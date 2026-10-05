@@ -126,6 +126,8 @@ ADMIN_HTML = """
         <p style="font-size:11px; color:#a1a1aa; margin-bottom:20px;">
             <a href="/" style="color:#fbbf24; text-decoration:none;">&larr; Kembali ke Beranda</a>
             &nbsp;|&nbsp;
+            <a href="/admin/orders" style="color:#34d399; text-decoration:none; font-weight:bold;">Inbox Pesanan{% if unread_count %} ({{ unread_count }}){% endif %}</a>
+            &nbsp;|&nbsp;
             <a href="/admin/logout" style="color:#ef4444; text-decoration:none;">Keluar</a>
         </p>
 
@@ -308,6 +310,9 @@ async def handle_admin(request):
     if not media_rows:
         media_rows = "<tr><td colspan='2' style='text-align:center; color:#71717a; padding:10px; font-size:11px;'>Belum ada file di-upload.</td></tr>"
 
+    from services import orders as orders_svc
+    unread_count = len(orders_svc.unread_notifications(get_conn(), limit=200))
+
     admin_html = render(
         ADMIN_HTML,
         current_homepage_html=current_homepage_html,
@@ -317,6 +322,7 @@ async def handle_admin(request):
         tier_options=Markup(tier_options),
         pkg_rows=Markup(pkg_rows),
         tmpl_rows=Markup(tmpl_rows),
+        unread_count=unread_count,
     )
     return web.Response(text=admin_html, content_type='text/html')
 

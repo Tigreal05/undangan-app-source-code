@@ -14,6 +14,13 @@ ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
 SECRET_KEY = os.getenv("SECRET_KEY", "")
 BASE_DOMAIN = os.getenv("BASE_DOMAIN", "invite.sukamoto.web.id")
 
+#: Admin WhatsApp number (digits only) used to build wa.me notification links.
+ADMIN_WHATSAPP = os.getenv("ADMIN_WHATSAPP", "6285156918852")
+
+#: Optional Telegram bot notifications — silent no-op when unset.
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+
 # Template engine directories (Phase 2)
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 #: Data-driven templates: templates_html/<tier>/<code-name>/{template.html,schema.json,preview.json}

@@ -227,6 +227,105 @@ def notify_admin(conn, kind: str, payload: dict):
     conn.commit()
 
 
+def unread_notifications(conn, limit: int = 50):
+    """Return [(id, kind, payload_dict, created_at)] of unread notifications."""
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, kind, payload_json, created_at FROM admin_notifications"
+        " WHERE read = 0 ORDER BY id DESC LIMIT ?", (int(limit),))
+    out = []
+    for nid, kind, payload_json, created_at in cursor.fetchall():
+        try:
+            payload = json.loads(payload_json or "{}")
+        except (ValueError, TypeError):
+            payload = {}
+        out.append((nid, kind, payload, created_at))
+    return out
+
+
+def mark_notification_read(conn, notification_id) -> int:
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE admin_notifications SET read = 1 WHERE id = ?",
+        (notification_id,))
+    conn.commit()
+    return cursor.rowcount
+
+
+# ---------------------------------------------------------------------------
+# Order event log (who / when / from -> to) — Phase 5
+# ---------------------------------------------------------------------------
+
+def log_order_event(conn, order_id, *, actor: str, action: str,
+                    from_status: str = "", to_status: str = "",
+                    note: str = ""):
+    """Append one row to order_events. Never raises on logging problems."""
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO order_events"
+            " (order_id, actor, action, from_status, to_status, note)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (order_id, actor, action, from_status, to_status, note))
+        conn.commit()
+    except Exception:
+        # Logging must never break a business transition; the DB may be old.
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Public slug generation (Phase 5 publish step)
+# ---------------------------------------------------------------------------
+
+_TRANSLIT = str.maketrans({
+    "à": "a", "á": "a", "â": "a", "ã": "a", "ä": "a", "å": "a",
+    "è": "e", "é": "e", "ê": "e", "ë": "e",
+    "ì": "i", "í": "i", "î": "i", "ï": "i",
+    "ò": "o", "ó": "o", "ô": "o", "õ": "o", "ö": "o",
+    "ù": "u", "ú": "u", "û": "u", "ü": "u",
+    "ñ": "n", "ç": "c", "&": " and ",
+})
+
+
+def slugify(text: str) -> str:
+    """'Rian & Siska' -> 'rian-dan-siska'; accents are transliterated, any
+    other non-alphanumeric run collapses to single hyphens."""
+    s = str(text or "").strip().lower()
+    s = s.replace("&", " dan ")
+    s = s.translate(_TRANSLIT)
+    s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
+    return s
+
+
+def generate_slug(conn, names_text: str, *, allow_custom: bool = False,
+                  custom: str = "") -> str:
+    """Build a unique invitation slug from the couple names.
+
+    * base = slugify(names); falls back to 'undangan'.
+    * Silver (allow_custom=False) always derives the slug from the names —
+      a supplied ``custom`` value is ignored.
+    * Gold/Platinum may supply ``custom`` (still slugified).
+    * On collision with an existing invitations.slug the suffix -2, -3 ...
+      is appended until free.
+    """
+    base = ""
+    if allow_custom and (custom or "").strip():
+        base = slugify(custom)
+    if not base:
+        base = slugify(names_text)
+    if not base:
+        base = "undangan"
+    cursor = conn.cursor()
+    slug = base
+    n = 1
+    while True:
+        cursor.execute("SELECT 1 FROM invitations WHERE slug = ? LIMIT 1", (slug,))
+        if cursor.fetchone() is None:
+            return slug
+        n += 1
+        slug = f"{base}-{n}"
+
+
 def can_transition(current: str, target: str) -> bool:
     return target in ALLOWED_TRANSITIONS.get(current, [])
 
@@ -259,12 +358,14 @@ def unique_code(length: int = 8, conn=None, table: str = "invitations",
             return code
 
 
-def transition(conn, order_id, target: str, *, actor_note: str = "") -> str:
+def transition(conn, order_id, target: str, *, actor_note: str = "",
+               actor: str = "system") -> str:
     """Move an order to ``target`` enforcing the state machine.
 
     Returns the new status. Raises IllegalTransition for unknown states or
     disallowed moves. Sets the matching timestamp column and refreshes
     ``expires_at`` from the tier when the invitation gets published.
+    Every successful move is logged in ``order_events`` (who/when/from->to).
     """
     current_status = ALLOWED_TRANSITIONS.keys()
     if target not in current_status:
@@ -307,6 +408,10 @@ def transition(conn, order_id, target: str, *, actor_note: str = "") -> str:
     params.append(order_id)
     cursor.execute(f"UPDATE orders SET {', '.join(sets)} WHERE id = ?", params)
     conn.commit()
+
+    # Phase 5: every status change is logged (who, when, from -> to).
+    log_order_event(conn, order_id, actor=actor, action=f"transition:{target}",
+                    from_status=current, to_status=target, note=actor_note)
     return target
 
 

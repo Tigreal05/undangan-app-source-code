@@ -411,6 +411,32 @@ def _m6_checkout(cursor):
     )
 
 
+@migration(7)
+def _m7_order_events(cursor):
+    """Phase 5: audit log for every order status change / admin action.
+
+    One row per event: who (actor), when (created_at), from_status -> to_status
+    plus a free-form action label and note (e.g. rejection reason).
+    """
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS order_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_id INTEGER NOT NULL,
+            actor TEXT NOT NULL DEFAULT 'system',
+            action TEXT NOT NULL DEFAULT '',
+            from_status TEXT NOT NULL DEFAULT '',
+            to_status TEXT NOT NULL DEFAULT '',
+            note TEXT NOT NULL DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (order_id) REFERENCES orders (id)
+        )
+    ''')
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_order_events_order"
+        " ON order_events (order_id)"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Seed data
 # ---------------------------------------------------------------------------
