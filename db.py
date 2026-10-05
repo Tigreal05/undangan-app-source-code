@@ -437,6 +437,28 @@ def _m7_order_events(cursor):
     )
 
 
+@migration(8)
+def _m8_phase7(cursor):
+    """Phase 7: live wish moderation + guest list tracking columns.
+
+    * ``wishes.hidden``   — couple can hide/unhide wishes (Gold feature).
+    * ``guests.opened_at`` / ``guests.checked_in_at`` — personal-link open
+      tracking and QR check-in by the usher.
+    All additive & idempotent via guarded ALTER TABLE.
+    """
+    _add_column(cursor, 'wishes', 'hidden', "INTEGER NOT NULL DEFAULT 0")
+    _add_column(cursor, 'guests', 'opened_at', "TIMESTAMP")
+    _add_column(cursor, 'guests', 'checked_in_at', "TIMESTAMP")
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_wishes_invitation"
+        " ON wishes (invitation_id)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_rsvps_invitation"
+        " ON rsvps (invitation_id)"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Seed data
 # ---------------------------------------------------------------------------
