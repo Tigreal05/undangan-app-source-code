@@ -1,0 +1,149 @@
+{
+  "version": 1,
+  "groups": [
+    {
+      "key": "couple",
+      "label": "Mempelai",
+      "fields": [
+        {"key": "title", "label": "Judul Nama (cth: Badil & Anita)", "type": "text", "required": true, "max_length": 80},
+        {"key": "intro", "label": "Kata Pengantar Mempelai", "type": "textarea", "min_tier": "gold", "max_length": 400}
+      ]
+    },
+    {
+      "key": "groom",
+      "label": "Mempelai Pria",
+      "fields": [
+        {"key": "full_name", "label": "Nama Lengkap + Gelar", "type": "text", "required": true, "max_length": 100},
+        {"key": "short_name", "label": "Nama Singkat", "type": "text", "max_length": 40},
+        {"key": "child_order", "label": "Anak ke- (cth: Putra Pertama dari)", "type": "text", "max_length": 60},
+        {"key": "parents", "label": "Nama Orang Tua", "type": "text", "max_length": 160},
+        {"key": "photo", "label": "Foto Pria", "type": "image", "accept": "image/*"},
+        {"key": "instagram", "label": "Instagram", "type": "text", "min_tier": "gold", "max_length": 60}
+      ]
+    },
+    {
+      "key": "bride",
+      "label": "Mempelai Wanita",
+      "fields": [
+        {"key": "full_name", "label": "Nama Lengkap + Gelar", "type": "text", "required": true, "max_length": 100},
+        {"key": "short_name", "label": "Nama Singkat", "type": "text", "max_length": 40},
+        {"key": "child_order", "label": "Anak ke- (cth: Putri Kedua dari)", "type": "text", "max_length": 60},
+        {"key": "parents", "label": "Nama Orang Tua", "type": "text", "max_length": 160},
+        {"key": "photo", "label": "Foto Wanita", "type": "image", "accept": "image/*"},
+        {"key": "instagram", "label": "Instagram", "type": "text", "min_tier": "gold", "max_length": 60}
+      ]
+    },
+    {
+      "key": "event",
+      "label": "Acara & Tanggal",
+      "fields": [
+        {"key": "date_iso", "label": "Tanggal Akad (YYYY-MM-DD)", "type": "date", "required": true},
+        {"key": "day_label_full", "label": "Label Hari + Tanggal", "type": "text", "max_length": 60},
+        {"key": "date_caps", "label": "Tanggal (kapital, hero)", "type": "text", "max_length": 40},
+        {"key": "time_range", "label": "Waktu", "type": "time", "max_length": 20}
+      ]
+    },
+    {
+      "key": "countdown",
+      "label": "Hitung Mundur",
+      "fields": [
+        {"key": "target_js", "label": "Target Countdown (format JS Date)", "type": "text", "max_length": 60}
+      ]
+    },
+    {
+      "key": "quote",
+      "label": "Ayat / Kutipan",
+      "fields": [
+        {"key": "text", "label": "Isi Kutipan", "type": "textarea", "min_tier": "gold", "max_length": 500},
+        {"key": "source", "label": "Sumber Kutipan", "type": "text", "min_tier": "gold", "max_length": 60}
+      ]
+    },
+    {
+      "key": "social",
+      "label": "Sosmed",
+      "fields": [
+        {"key": "hashtag", "label": "Hashtag (cth: #BadilAnitaInLove)", "type": "text", "min_tier": "gold", "max_length": 60}
+      ]
+    },
+    {
+      "key": "footer",
+      "label": "Footer",
+      "fields": [
+        {"key": "year", "label": "Tahun", "type": "text", "max_length": 8},
+        {"key": "brand", "label": "Teks Brand", "type": "text", "max_length": 120}
+      ]
+    }
+  ],
+  "repeatables": [
+    {
+      "key": "events",
+      "label": "Daftar Acara",
+      "min_tier": "silver",
+      "item_fields": [
+        {"key": "label", "label": "Nama Acara (Akad/Resepsi)", "type": "text", "required": true, "max_length": 60},
+        {"key": "icon", "label": "Ikon FontAwesome", "type": "text", "max_length": 50},
+        {"key": "day_date", "label": "Hari, Tanggal", "type": "text", "max_length": 60},
+        {"key": "time_range", "label": "Jam", "type": "text", "max_length": 40},
+        {"key": "venue_name", "label": "Nama Gedung", "type": "text", "max_length": 100},
+        {"key": "venue_address", "label": "Alamat", "type": "textarea", "max_length": 200},
+        {"key": "map_url", "label": "Link Google Maps", "type": "text", "min_tier": "gold", "max_length": 300},
+        {"key": "btn_class", "label": "Style Tombol", "type": "select", "options": ["btn-outline-matcha", "btn-matcha"]},
+        {"key": "btn_icon", "label": "Ikon Tombol", "type": "text", "max_length": 50},
+        {"key": "btn_label", "label": "Label Tombol", "type": "text", "max_length": 40}
+      ]
+    },
+    {
+      "key": "gallery",
+      "label": "Galeri Foto",
+      "min_tier": "silver",
+      "item_fields": [
+        {"key": "src", "label": "Foto", "type": "image", "accept": "image/*"}
+      ]
+    },
+    {
+      "key": "accounts",
+      "label": "Rekening Amplop Digital",
+      "min_tier": "gold",
+      "item_fields": [
+        {"key": "bank", "label": "Bank", "type": "text", "max_length": 30},
+        {"key": "number", "label": "No. Rekening", "type": "text", "max_length": 30},
+        {"key": "holder", "label": "Atas Nama", "type": "text", "max_length": 60}
+      ]
+    }
+  ],
+  "theme": {
+    "colors": [
+      {"key": "primary", "label": "Warna Utama", "type": "color", "min_tier": "silver",
+       "presets": [
+         {"value": "#2e3e30", "label": "Matcha Deep"},
+         {"value": "#6b8268", "label": "Matcha Main"},
+         {"value": "#7f1d1d", "label": "Burgundy"},
+         {"value": "#1e5128", "label": "Islamic Green"}
+       ]},
+      {"key": "accent", "label": "Warna Aksen", "type": "color", "min_tier": "gold",
+       "presets": [
+         {"value": "#cfa86e", "label": "Gold Classic"},
+         {"value": "#d4af37", "label": "Gold Bright"},
+         {"value": "#b9787b", "label": "Dusty Rose"}
+       ]},
+      {"key": "bg", "label": "Warna Latar", "type": "color", "min_tier": "gold",
+       "presets": [
+         {"value": "#f4f6f2", "label": "Cream"},
+         {"value": "#fff8f1", "label": "Ivory"},
+         {"value": "#faf5f4", "label": "Rose Mist"}
+       ]}
+    ],
+    "fonts": [
+      {"key": "font_head", "label": "Font Judul", "type": "select", "min_tier": "platinum",
+       "options": ["'Playfair Display', serif", "'Amiri', serif", "'Cormorant Garamond', serif"]},
+      {"key": "font_body", "label": "Font Isi", "type": "select", "min_tier": "platinum",
+       "options": ["'Plus Jakarta Sans', sans-serif", "'Nunito', sans-serif", "'Montserrat', sans-serif"]}
+    ]
+  },
+  "features": {
+    "custom_wording": "quote",
+    "custom_sections": "couple_intro",
+    "custom_music": "music_url",
+    "video_call": "livestream_url"
+  }
+}
