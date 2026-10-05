@@ -1,6 +1,11 @@
-# Python compiled files
 __pycache__/
 *.pyc
-
-# Database files
+.pytest_cache/
+venv/
+.env
 *.db
+*.db-journal
+backups/
+static_uploads/
+uploads/
+hasil.md
