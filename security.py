@@ -254,6 +254,11 @@ _SCRYPT_N = 2 ** 14
 _SCRYPT_R = 8
 _SCRYPT_P = 1
 
+# Test-only speed knob: set SCRYPT_COST_LOW=1 in tests/conftest.py to drop the
+# work factor. Production never sets it, so production cost stays at N=2**14.
+if os.environ.get("SCRYPT_COST_LOW") == "1":
+    _SCRYPT_N = 2 ** 10
+
 
 def hash_password(password: str) -> str:
     """Return 'scrypt$N$r$p$salt_hex$hash_hex' for storage in clients.password_hash."""

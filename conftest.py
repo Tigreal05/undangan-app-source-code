@@ -2,6 +2,11 @@
 import os
 import sys
 
+# Speed (Phase 7.5 B3): low scrypt cost for tests ONLY. Must be set before
+# `security` is imported anywhere; production never sets this env var, so the
+# real hashing cost (N=2**14) stays unchanged.
+os.environ["SCRYPT_COST_LOW"] = "1"
+
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
