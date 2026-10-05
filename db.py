@@ -459,6 +459,44 @@ def _m8_phase7(cursor):
     )
 
 
+@migration(9)
+def _m9_tier_matrix_fix(cursor):
+    """Phase 7.5 (B1): repair the PRODUCTION BUG in the seeded tier matrix.
+
+    Silver was wrongly granted the ``qr`` feature and had limits below spec
+    (gallery 5 / video 0 / events 1 instead of 10 / 1 / 2); Platinum had
+    gold-level limits instead of 'no limits'. The authoritative fix lives in
+    services/tiers.py; this migration rewrites tiers.features_json and
+    tiers.limits_json for every existing row from that catalogue so already-
+    migrated databases converge on the correct values. Additive & idempotent
+    (pure UPDATE, no schema change).
+    """
+    import json
+    import services.tiers as tiers_svc
+
+    try:
+        rows = cursor.execute("SELECT code FROM tiers").fetchall()
+    except sqlite3.Error:      # pragma: no cover - tiers table always exists here
+        return
+    for (code,) in rows:
+        if code not in getattr(tiers_svc, "_BY_CODE", {}):
+            continue
+        features = [f for f in _FULL_FEATURES
+                    if tiers_svc.has_feature(code, f)]
+        limits = {k: tiers_svc.limit(code, k) for k in tiers_svc.KNOWN_LIMITS}
+        cursor.execute(
+            "UPDATE tiers SET features_json = ?, limits_json = ?,"
+            " active_days = ?, name = ?, subtitle = ?, positioning = ?,"
+            " price_label = ?, sort_order = ? WHERE code = ?",
+            (json.dumps(features), json.dumps(limits),
+             tiers_svc.active_days(code),
+             tiers_svc.get_tier(code)["name"],
+             tiers_svc.get_tier(code)["subtitle"],
+             tiers_svc.get_tier(code)["positioning"],
+             tiers_svc.get_tier(code)["price_label"],
+             tiers_svc.get_tier(code)["sort_order"], code))
+
+
 # ---------------------------------------------------------------------------
 # Seed data
 # ---------------------------------------------------------------------------

@@ -140,40 +140,113 @@ def test_tiers_seeded_with_positioning_and_days(tmp_path):
         conn.close()
 
 
+# ---------------------------------------------------------------------------
+# Phase 7.5 (B2): authoritative spec matrix (PLAYBOOK section 1).
+# ---------------------------------------------------------------------------
+
+#: Features that are TRUE for Silver (and therefore for every higher tier).
+SILVER_FEATURES = {"rsvp", "wishes", "gift", "personal_link", "music",
+                   "countdown", "map"}
+#: Features added by Gold on top of Silver's set.
+GOLD_EXTRA_FEATURES = {"live_rsvp", "guest_list", "qr", "multi_event",
+                       "custom_slug", "custom_colors", "custom_fonts",
+                       "custom_cover", "custom_background", "custom_sections",
+                       "custom_wording", "og_preview"}
+#: The only feature left for Platinum.
+PLATINUM_EXTRA_FEATURES = {"custom_design"}
+ALL_FEATURES = SILVER_FEATURES | GOLD_EXTRA_FEATURES | PLATINUM_EXTRA_FEATURES
+
+SPEC_FEATURES = {
+    "silver": SILVER_FEATURES,
+    "gold": SILVER_FEATURES | GOLD_EXTRA_FEATURES,
+    "platinum": ALL_FEATURES,
+}
+
+#: Spec-mandated limits (gallery / video / events per PLAYBOOK section 1);
+#: Platinum is "no limits" => very high values.
+SPEC_LIMITS = {
+    "silver": {"max_gallery": 10, "max_videos": 1, "max_events": 2},
+    "gold": {"max_gallery": 30, "max_videos": 3, "max_events": 6},
+    "platinum": {"max_gallery": 999, "max_videos": 99, "max_events": 99},
+}
+
+
 def test_has_feature_matrix():
-    # Core features on every tier.
-    for code in ("silver", "gold", "platinum"):
-        for key in ("rsvp", "wishes", "gift", "personal_link", "music",
-                    "countdown", "map", "qr"):
-            assert tiers_svc.has_feature(code, key), (code, key)
-    # Gold+ extras; silver must NOT have them.
-    for key in ("live_rsvp", "guest_list", "multi_event", "custom_slug",
-                "custom_colors", "custom_fonts", "og_preview"):
-        assert not tiers_svc.has_feature("silver", key)
-        assert tiers_svc.has_feature("gold", key)
-        assert tiers_svc.has_feature("platinum", key)
-    # Platinum-only bespoke features.
-    for key in ("custom_cover", "custom_background", "custom_sections",
-                "custom_wording", "custom_design"):
-        assert not tiers_svc.has_feature("gold", key)
-        assert not tiers_svc.has_feature("silver", key)
-        assert tiers_svc.has_feature("platinum", key)
+    """Full spec matrix for all three tiers (Phase 7.5 B2)."""
+    for code, expected in SPEC_FEATURES.items():
+        for key in ALL_FEATURES:
+            got = tiers_svc.has_feature(code, key)
+            assert got == (key in expected), (code, key, got)
+    # Explicit spot-checks from the spec text.
+    assert tiers_svc.has_feature("gold", "custom_cover")        # gold HAS it
+    assert not tiers_svc.has_feature("silver", "qr")            # qr is NOT silver
+    assert not tiers_svc.has_feature("gold", "custom_design")   # bespoke-only
+    assert tiers_svc.has_feature("platinum", "custom_design")
     # Unknown tier/key never explodes.
     assert tiers_svc.has_feature("bronze", "rsvp") is False
     assert tiers_svc.has_feature("gold", "nope") is False
 
 
 def test_limit_values():
-    assert tiers_svc.limit("silver", "max_events") == 1
-    assert tiers_svc.limit("gold", "max_events") == 2
-    assert tiers_svc.limit("platinum", "max_events") == 4
-    assert tiers_svc.limit("silver", "max_guests") == 100
-    assert tiers_svc.limit("gold", "max_guests") == 500
-    assert tiers_svc.limit("platinum", "max_guests") == 2000
+    """Spec limits for gallery/video/events + extras, all three tiers."""
+    for code, expected in SPEC_LIMITS.items():
+        for key, value in expected.items():
+            got = tiers_svc.limit(code, key)
+            assert got == value, (code, key, got, value)
+    # Non-spec limits still monotonic silver < gold < platinum.
+    assert (tiers_svc.limit("silver", "max_guests")
+            < tiers_svc.limit("gold", "max_guests")
+            < tiers_svc.limit("platinum", "max_guests"))
     assert tiers_svc.limit("silver", "custom_requests") == 0
     assert tiers_svc.limit("platinum", "custom_requests") == 10
     assert tiers_svc.limit("silver", "unknown_key") == 0
     assert tiers_svc.limit("nope", "max_guests") == 0
+
+
+def test_seeded_db_matches_spec_matrix(tmp_path):
+    """The DB seed/migration must mirror the spec, not just the Python dict."""
+    conn = _seeded_conn(tmp_path)
+    try:
+        for code, expected in SPEC_FEATURES.items():
+            row = conn.execute(
+                "SELECT features_json, limits_json FROM tiers WHERE code = ?",
+                (code,)).fetchone()
+            feats = set(json.loads(row[0]))
+            lims = json.loads(row[1])
+            assert feats == expected, code
+            for key, value in SPEC_LIMITS[code].items():
+                assert lims[key] == value, (code, key, lims[key], value)
+    finally:
+        conn.close()
+
+
+def test_migration_9_repairs_stale_silver_row(tmp_path):
+    """Migration 9 fixes an already-seeded DB with the buggy Silver row."""
+    conn = fresh_conn(tmp_path)
+    try:
+        db_mod.migrate(conn)
+        db_mod._seed_data(conn.cursor())
+        conn.commit()
+        # Simulate the pre-fix production state directly in the DB.
+        conn.execute(
+            "UPDATE tiers SET features_json = ?, limits_json = ?"
+            " WHERE code = 'silver'",
+            (json.dumps(sorted(SILVER_FEATURES | {"qr"})),
+             json.dumps({"max_events": 1, "max_gallery": 5, "max_videos": 0})))
+        conn.execute("UPDATE schema_version SET version = 8")
+        conn.commit()
+        db_mod.migrate(conn)   # applies migration 9
+        conn.commit()
+        row = conn.execute(
+            "SELECT features_json, limits_json FROM tiers WHERE code='silver'"
+        ).fetchone()
+        feats = set(json.loads(row[0]))
+        lims = json.loads(row[1])
+        assert "qr" not in feats and feats == SPEC_FEATURES["silver"]
+        assert lims["max_events"] == 2 and lims["max_gallery"] == 10 \
+            and lims["max_videos"] == 1
+    finally:
+        conn.close()
 
 
 def test_duration_label_from_tier_only():

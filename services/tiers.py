@@ -21,14 +21,16 @@ TIERS = [
         "active_days": 30,
         "price_label": "Rp 150.000",
         "sort_order": 1,
+        # Phase 7.5 (B1): 'qr' removed — spec says qr is false for Silver.
         "features": {
             "rsvp", "wishes", "gift", "personal_link", "music",
-            "countdown", "map", "qr",
+            "countdown", "map",
         },
         "limits": {
-            "max_events": 1,
-            "max_gallery": 5,
-            "max_videos": 0,
+            # Phase 7.5 (B1): aligned with PLAYBOOK section 1 matrix.
+            "max_events": 2,
+            "max_gallery": 10,
+            "max_videos": 1,
             "max_music_mb": 10,
             "max_guests": 100,
             "max_wishes": 200,
@@ -79,10 +81,11 @@ TIERS = [
             "custom_wording", "og_preview", "custom_design",
         },
         "limits": {
-            "max_events": 6,
-            "max_gallery": 30,
-            "max_videos": 3,
-            "max_music_mb": 10,
+            # Phase 7.5 (B1): Platinum = no limits (very high values).
+            "max_events": 99,
+            "max_gallery": 999,
+            "max_videos": 99,
+            "max_music_mb": 50,
             "max_guests": 2000,
             "max_wishes": 5000,
             "media_count": 50,
