@@ -16,7 +16,8 @@ from aiohttp import web
 
 import config
 import security
-from db import init_db
+from db import get_conn, init_db
+from routes import admin_orders as admin_orders_routes
 from routes import admin as admin_routes
 from routes import public as public_routes
 
@@ -30,6 +31,7 @@ def create_app() -> web.Application:
 
     public_routes.setup(app)
     admin_routes.setup(app)
+    admin_orders_routes.setup(app)
 
     app.router.add_static('/static_uploads/', path=config.UPLOAD_DIR, name='static_uploads')
     return app

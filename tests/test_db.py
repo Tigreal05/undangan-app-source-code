@@ -221,6 +221,7 @@ def test_legal_transition_chain(tmp_path):
         conn.commit()
 
         assert orders_svc.transition(conn, oid, "pending_payment") == "pending_payment"
+        assert orders_svc.transition(conn, oid, "payment_reported") == "payment_reported"
         assert orders_svc.transition(conn, oid, "paid") == "paid"
         assert orders_svc.transition(conn, oid, "in_protection") == "in_protection"
         assert orders_svc.transition(conn, oid, "published") == "published"
@@ -243,7 +244,12 @@ ILLEGAL_MOVES = [
     ("new", "paid"),
     ("new", "published"),
     ("new", "expired"),
+    ("draft", "paid"),
+    ("draft", "published"),
     ("pending_payment", "published"),
+    ("pending_payment", "paid"),  # must go through payment_reported first
+    ("payment_reported", "published"),
+    ("payment_reported", "in_protection"),
     ("paid", "new"),
     ("in_protection", "paid"),
     ("published", "paid"),
