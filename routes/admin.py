@@ -16,6 +16,7 @@ import config
 import security
 from db import get_conn
 from routes.common import render
+from services import tiers as tiers_svc
 
 
 # ---------------------------------------------------------------------------
@@ -174,10 +175,13 @@ ADMIN_HTML = """
                     <option value="">-- Pilih Kategori Paket --</option>
                     {{ pkg_options }}
                 </select>
+                <select name="tier_id" required>
+                    <option value="">-- Pilih Tier (durasi aktif) --</option>
+                    {{ tier_options }}
+                </select>
                 <input type="text" name="name" placeholder="Nama Template (Contoh: Royal Velvet)" required>
                 <input type="text" name="price" placeholder="Harga (Contoh: Rp 250.000)" required>
                 <input type="text" name="discount" placeholder="Keterangan Diskon (Cth: Diskon 20%)">
-                <input type="text" name="duration" placeholder="Durasi Aktif (Cth: Aktif 1 Tahun)">
                 <div style="display: flex; align-items: center; gap: 8px; margin: 6px 0; font-size: 12px; color: #fff;">
                     <input type="checkbox" name="is_top10" value="1" style="width: auto; margin:0;"> Masukkan ke 10 Template Terbaik (Homepage)
                 </div>
@@ -226,9 +230,10 @@ async def handle_admin(request):
     pkgs = cursor.fetchall()
 
     cursor.execute('''
-        SELECT t.id, t.name, t.price, p.name, t.discount, t.duration, t.is_top10
+        SELECT t.id, t.name, t.price, p.name, t.discount, t.duration, t.is_top10, ti.code
         FROM templates t
         JOIN packages p ON t.package_id = p.id
+        LEFT JOIN tiers ti ON t.tier_id = ti.id
     ''')
     tmpls = cursor.fetchall()
 
@@ -248,6 +253,18 @@ async def handle_admin(request):
     for pid, pname, _ in pkgs:
         pkg_options += render('<option value="{{ pid }}">{{ pname }}</option>', pid=pid, pname=pname)
 
+    cursor = get_conn()  # reopen briefly for tier list (init guarantees table)
+    tier_rows_db = cursor.execute(
+        'SELECT id, code, name, active_days FROM tiers ORDER BY sort_order'
+    ).fetchall()
+    cursor.close()
+
+    tier_options = ""
+    for tid_, tcode, tname_, tdays in tier_rows_db:
+        tier_options += render(
+            '<option value="{{ tid_ }}">{{ tname_ }} — aktif {{ tdays }} hari</option>',
+            tid_=tid_, tname_=tname_, tdays=tdays)
+
     pkg_rows = ""
     for pid, name, sub in pkgs:
         pkg_rows += render("""
@@ -264,7 +281,9 @@ async def handle_admin(request):
         """, pid=pid, name=name, sub=sub)
 
     tmpl_rows = ""
-    for tid, tname, tprice, pname, tdisc, tdur, top10 in tmpls:
+    for tid, tname, tprice, pname, tdisc, tdur, top10, ttier in tmpls:
+        # Duration always comes from the tier's active_days (never templates.duration).
+        tdur = f"{tiers_svc.active_days(ttier)} hari" if ttier else "30 hari"
         tmpl_rows += render("""
         <tr style="border-bottom:1px solid #27272a;">
             <td style="padding:10px; font-weight:bold;">{{ tname }}
@@ -295,6 +314,7 @@ async def handle_admin(request):
         upload_error=upload_error,
         media_rows=Markup(media_rows),
         pkg_options=Markup(pkg_options),
+        tier_options=Markup(tier_options),
         pkg_rows=Markup(pkg_rows),
         tmpl_rows=Markup(tmpl_rows),
     )
@@ -415,20 +435,21 @@ async def handle_add_tmpl(request):
     data = await request.post()
     if data.get('package_id') and data.get('name') and data.get('price'):
         is_top10 = 1 if data.get('is_top10') == '1' else 0
+        # Duration is NOT captured here: it comes from the tier's active_days.
         conn = get_conn()
         cursor = conn.cursor()
         cursor.execute('''
-            INSERT INTO templates (package_id, name, price, discount, duration, image_url, html_code, is_top10)
+            INSERT INTO templates (package_id, name, price, discount, image_url, html_code, is_top10, tier_id)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             data.get('package_id'),
             data.get('name'),
             data.get('price'),
             data.get('discount'),
-            data.get('duration'),
             data.get('image_url'),
             data.get('html_code'),
-            is_top10
+            is_top10,
+            data.get('tier_id') or None,
         ))
         conn.commit()
         conn.close()

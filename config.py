@@ -7,6 +7,7 @@ load_dotenv()
 
 DB_NAME = os.getenv("DB_PATH", "undangan.db")
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "./static_uploads")
+BACKUP_DIR = os.getenv("BACKUP_DIR", "backups")
 HOMEPAGE_FILE = "homepage.html"
 
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")

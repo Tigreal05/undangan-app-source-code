@@ -12,6 +12,27 @@ from markupsafe import Markup
 import config
 from db import get_conn
 from routes.common import BASE_HEAD, FOOTER_HTML, NAV_SCRIPT, render
+from services.tiers import duration_label as _tier_duration, get_tier
+
+# Legacy free-text values that used to live in templates.duration; the period
+# now comes exclusively from the tier's active_days (services/tiers.py).
+_LEGACY_DURATION_MAP = {
+    'Aktif 6 Bulan': 'silver',
+    'Aktif 1 Tahun': 'gold',
+    'Aktif Selamanya': 'platinum',
+}
+
+
+def resolve_duration(tier_code, legacy_duration=''):
+    """Human-readable active period ('30 hari', ...) — never from templates.duration."""
+    if not tier_code and legacy_duration:
+        tier_code = _LEGACY_DURATION_MAP.get(str(legacy_duration).strip())
+    if not tier_code:
+        tier_code = 'silver'
+    try:
+        return _tier_duration(tier_code)
+    except KeyError:
+        return _tier_duration('silver')
 
 
 def _json_script(name: str, value) -> Markup:
@@ -48,7 +69,11 @@ async def handle_index(request):
     conn = get_conn()
     cursor = conn.cursor()
 
-    cursor.execute('SELECT id, name, price, discount, duration, image_url FROM templates WHERE is_top10 = 1 LIMIT 10')
+    cursor.execute('''
+        SELECT t.id, t.name, t.price, t.discount, t.duration, t.image_url, ti.code
+        FROM templates t LEFT JOIN tiers ti ON t.tier_id = ti.id
+        WHERE t.is_top10 = 1 LIMIT 10
+    ''')
     top10 = cursor.fetchall()
 
     cursor.execute('SELECT id, name, subtitle, image_url FROM packages')
@@ -62,7 +87,8 @@ async def handle_index(request):
         custom_homepage_html = "<p>File homepage.html tidak ditemukan.</p>"
 
     top10_html = ""
-    for tid, tname, tprice, tdisc, tdur, timg in top10:
+    for tid, tname, tprice, tdisc, tdur, timg, ttier in top10:
+        tdur = resolve_duration(ttier, tdur)
         top10_html += render("""
         <div style="min-width: 130px; background: #18181b; border: 1px solid #27272a; border-radius: 10px; overflow: hidden; display: flex; flex-direction: column; justify-content: space-between;">
             <div style="height: 90px; position: relative;">
@@ -169,7 +195,11 @@ async def handle_templates(request):
     pkg_res = cursor.fetchone()
     pkg_name = pkg_res[0] if pkg_res else "Koleksi Paket"
 
-    cursor.execute('SELECT id, name, price, discount, duration, image_url FROM templates WHERE package_id = ?', (pkg_id,))
+    cursor.execute('''
+        SELECT t.id, t.name, t.price, t.discount, t.duration, t.image_url, ti.code
+        FROM templates t LEFT JOIN tiers ti ON t.tier_id = ti.id
+        WHERE t.package_id = ?
+    ''', (pkg_id,))
     tmpls = cursor.fetchall()
 
     cursor.execute('SELECT id, name FROM packages')
@@ -177,7 +207,8 @@ async def handle_templates(request):
     conn.close()
 
     grid_html = ""
-    for tid, tname, tprice, tdisc, tdur, timg in tmpls:
+    for tid, tname, tprice, tdisc, tdur, timg, ttier in tmpls:
+        tdur = resolve_duration(ttier, tdur)
         grid_html += render("""
         <div class="tmpl-card">
             <div class="tmpl-img">
@@ -272,7 +303,11 @@ async def handle_template_action(request):
 
     conn = get_conn()
     cursor = conn.cursor()
-    cursor.execute('SELECT name, price, discount, duration, image_url FROM templates WHERE id = ?', (tmpl_id,))
+    cursor.execute('''
+        SELECT t.name, t.price, t.discount, t.duration, t.image_url, ti.code
+        FROM templates t LEFT JOIN tiers ti ON t.tier_id = ti.id
+        WHERE t.id = ?
+    ''', (tmpl_id,))
     tmpl = cursor.fetchone()
 
     cursor.execute('SELECT id, name FROM packages')
@@ -282,7 +317,8 @@ async def handle_template_action(request):
     if not tmpl:
         return web.Response(text="Template tidak terdaftar", status=404)
 
-    tname, tprice, tdisc, tdur, timg = tmpl
+    tname, tprice, tdisc, tdur, timg, ttier = tmpl
+    tdur = resolve_duration(ttier, tdur)
 
     html_content = render("""
     <!DOCTYPE html>
@@ -400,14 +436,19 @@ async def handle_checkout(request):
     tmpl_id = request.query.get('id')
     conn = get_conn()
     cursor = conn.cursor()
-    cursor.execute('SELECT name, price, discount, duration FROM templates WHERE id = ?', (tmpl_id,))
+    cursor.execute('''
+        SELECT t.name, t.price, t.discount, t.duration, ti.code
+        FROM templates t LEFT JOIN tiers ti ON t.tier_id = ti.id
+        WHERE t.id = ?
+    ''', (tmpl_id,))
     tmpl = cursor.fetchone()
     conn.close()
 
     if not tmpl:
         return web.Response(text="Data checkout tidak valid", status=404)
 
-    tname, tprice, tdisc, tdur = tmpl
+    tname, tprice, tdisc, tdur, ttier = tmpl
+    tdur = resolve_duration(ttier, tdur)
     html_content = render("""
     <!DOCTYPE html>
     <html lang="id">

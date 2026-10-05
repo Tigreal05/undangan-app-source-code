@@ -16,10 +16,12 @@ def isolated_env(tmp_path, monkeypatch):
     db_path = str(tmp_path / "test.db")
     upload_dir = str(tmp_path / "static_uploads")
     homepage = str(tmp_path / "homepage.html")
+    backup_dir = str(tmp_path / "backups")
 
     monkeypatch.setattr(config, "DB_NAME", db_path)
     monkeypatch.setattr(config, "UPLOAD_DIR", upload_dir)
     monkeypatch.setattr(config, "HOMEPAGE_FILE", homepage)
+    monkeypatch.setattr(config, "BACKUP_DIR", backup_dir)
     monkeypatch.setattr(config, "ADMIN_PASSWORD", "s3cret-admin-pw")
     monkeypatch.setattr(config, "SECRET_KEY", "unit-test-secret")
 
@@ -31,4 +33,8 @@ def isolated_env(tmp_path, monkeypatch):
     monkeypatch.setattr("db.get_conn", _get_conn)
 
     security.reset_login_attempts()
+
+    # The one-shot DB backup guard must be reset per test as well.
+    import db
+    monkeypatch.setattr(db, "_BACKUP_CREATED", False)
     yield
