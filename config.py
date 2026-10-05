@@ -14,6 +14,13 @@ ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
 SECRET_KEY = os.getenv("SECRET_KEY", "")
 BASE_DOMAIN = os.getenv("BASE_DOMAIN", "invite.sukamoto.web.id")
 
+# Template engine directories (Phase 2)
+REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+#: Data-driven templates: templates_html/<tier>/<code-name>/{template.html,schema.json,preview.json}
+TEMPLATES_HTML_DIR = os.getenv("TEMPLATES_HTML_DIR", os.path.join(REPO_ROOT, "templates_html"))
+#: Original static HTML files (legacy / not-yet-converted templates)
+LEGACY_TEMPLATES_DIR = os.getenv("LEGACY_TEMPLATES_DIR", os.path.join(REPO_ROOT, "templates"))
+
 # Upload hardening policy
 ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png", "webp", "mp3", "mp4"}
 IMAGE_EXTENSIONS = {"jpg", "jpeg", "png", "webp"}

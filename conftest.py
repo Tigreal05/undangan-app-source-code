@@ -25,6 +25,13 @@ def isolated_env(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "ADMIN_PASSWORD", "s3cret-admin-pw")
     monkeypatch.setattr(config, "SECRET_KEY", "unit-test-secret")
 
+    # Template HTML sources live in the repo; keep them resolvable from tmp dirs.
+    repo_root = os.path.dirname(os.path.abspath(__file__))
+    monkeypatch.setattr(
+        config, "TEMPLATES_HTML_DIR", os.path.join(repo_root, "templates_html"))
+    monkeypatch.setattr(
+        config, "LEGACY_TEMPLATES_DIR", os.path.join(repo_root, "templates"))
+
     # Handlers import get_conn from the db module; it reads config lazily.
     def _get_conn():
         import sqlite3
