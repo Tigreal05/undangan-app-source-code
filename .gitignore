@@ -1,0 +1,6 @@
+# Python compiled files
+__pycache__/
+*.pyc
+
+# Uploads/Generated assets (based on deleted static_uploads)
+static_uploads/
