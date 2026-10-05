@@ -1,0 +1,400 @@
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Albert+Sans:ital,wght@0,300..800;1,400&family=Lavishly+Yours&display=swap"
+      rel="stylesheet"
+    />
+    <title>Najin & Tasya — Undangan Pernikahan</title>
+    <style>
+      :root {
+        box-sizing: border-box;
+        padding-top: env(safe-area-inset-top, 0px);
+        padding-bottom: env(safe-area-inset-bottom, 0px);
+
+        --ink: #3a2b2c;
+        --paper: #fff8f5;
+        --blush: #f6dcda;
+        --blush-soft: #fdeeec;
+        --gold: #b6874a;
+        --gold-soft: #d8b481;
+        --bg: #eccdc7;
+        --rose-line: #c98f92;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root:not([data-theme="light"]) {
+          --ink: #f1e4e0;
+          --paper: #2a181d;
+          --blush: #3d2027;
+          --blush-soft: #33191f;
+          --gold: #dcb878;
+          --gold-soft: #b98c53;
+          --bg: #170c0f;
+          --rose-line: #7a3d43;
+        }
+      }
+      :root[data-theme="dark"] {
+        --ink: #f1e4e0;
+        --paper: #2a181d;
+        --blush: #3d2027;
+        --blush-soft: #33191f;
+        --gold: #dcb878;
+        --gold-soft: #b98c53;
+        --bg: #170c0f;
+        --rose-line: #7a3d43;
+      }
+
+      * { box-sizing: border-box; }
+      html, body {
+        height: 100%;
+        margin: 0;
+      }
+      html { scroll-padding-top: env(safe-area-inset-top, 0px); }
+      body {
+        font-family: 'Albert Sans', sans-serif;
+        background: radial-gradient(ellipse at 50% 20%, var(--blush-soft), var(--bg) 75%);
+        color: var(--ink);
+        min-height: 100%;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: max(24px, env(safe-area-inset-top, 0px)) 16px max(24px, env(safe-area-inset-bottom, 0px));
+        overflow-x: hidden;
+      }
+
+      .stage {
+        width: min(92vw, 420px);
+        aspect-ratio: 3 / 4.5;
+        perspective: 1800px;
+        position: relative;
+      }
+
+      .book {
+        position: absolute;
+        inset: 0;
+        border-radius: 14px;
+        box-shadow: 0 18px 40px rgba(30, 10, 12, 0.28), 0 2px 8px rgba(30, 10, 12, 0.18);
+      }
+
+      .page {
+        position: absolute;
+        inset: 0;
+        background: var(--paper);
+        border-radius: 14px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        padding: 2.4em 1.9em;
+        transform-origin: left center;
+        transform-style: preserve-3d;
+        backface-visibility: hidden;
+        transition: transform 0.85s cubic-bezier(.6,.1,.25,1), box-shadow 0.85s ease;
+        box-shadow: -6px 0 18px rgba(20, 8, 10, 0.14);
+        cursor: pointer;
+        user-select: none;
+      }
+      .page.flipped {
+        transform: rotateY(-178deg);
+        box-shadow: 6px 0 18px rgba(20, 8, 10, 0.14);
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .page { transition: none; }
+      }
+
+      .page-inner { max-width: 100%; }
+
+      .kicker {
+        font-size: 0.82em;
+        letter-spacing: 0.02em;
+        color: var(--gold);
+        margin: 0 0 0.6em;
+      }
+      h1.script {
+        font-family: 'Lavishly Yours', cursive;
+        font-size: 2.5em;
+        font-weight: 400;
+        line-height: 1.15;
+        margin: 0 0 0.3em;
+        color: var(--ink);
+      }
+      h2.script {
+        font-family: 'Lavishly Yours', cursive;
+        font-weight: 400;
+        font-size: 1.9em;
+        margin: 0.2em 0;
+        color: var(--ink);
+      }
+      .names {
+        font-family: 'Albert Sans', sans-serif;
+        font-weight: 600;
+        font-size: 1.15em;
+        letter-spacing: 0.02em;
+        margin: 0.4em 0 0.9em;
+      }
+      p {
+        font-size: 0.98em;
+        line-height: 1.6;
+        margin: 0.6em 0;
+        color: var(--ink);
+        opacity: 0.92;
+      }
+      .placeholder {
+        font-style: italic;
+        opacity: 0.65;
+        font-size: 0.9em;
+      }
+      .divider {
+        width: 46px;
+        height: 1px;
+        background: var(--rose-line);
+        margin: 1em auto;
+        opacity: 0.8;
+      }
+      .ornament { width: 68px; margin: 0 auto 0.8em; display: block; opacity: 0.85; }
+      .ornament path { stroke: var(--gold); }
+      .date-badge {
+        display: inline-block;
+        margin-top: 0.4em;
+        padding: 0.4em 1em;
+        border: 1px solid var(--rose-line);
+        border-radius: 30px;
+        font-size: 0.95em;
+        letter-spacing: 0.02em;
+      }
+      .event-block {
+        margin: 1em 0;
+        text-align: left;
+        display: inline-block;
+      }
+      .event-block .label { font-weight: 600; font-size: 0.95em; }
+      .event-block .detail { font-size: 0.9em; opacity: 0.85; margin: 0.1em 0 0; }
+
+      .hint {
+        position: absolute;
+        bottom: 1.1em;
+        left: 50%;
+        transform: translateX(-50%);
+        font-size: 0.78em;
+        opacity: 0.55;
+        letter-spacing: 0.02em;
+        display: flex;
+        align-items: center;
+        gap: 0.35em;
+      }
+      .hint svg { width: 12px; height: 12px; }
+
+      .corner {
+        position: absolute;
+        bottom: 0;
+        right: 0;
+        width: 0;
+        height: 0;
+        border-style: solid;
+        border-width: 0 0 26px 26px;
+        border-color: transparent transparent var(--blush) transparent;
+        border-bottom-right-radius: 14px;
+        opacity: 0.9;
+      }
+
+      .nav {
+        display: flex;
+        gap: 14px;
+        margin-top: 22px;
+        align-items: center;
+      }
+      .nav button {
+        border: none;
+        background: var(--paper);
+        color: var(--ink);
+        width: 40px;
+        height: 40px;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        box-shadow: 0 4px 10px rgba(20,8,10,0.18);
+        transition: opacity 0.2s ease, transform 0.2s ease;
+      }
+      .nav button:disabled { opacity: 0.35; cursor: default; }
+      .nav button:not(:disabled):hover { transform: translateY(-1px); }
+      .nav button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+      .nav svg { width: 16px; height: 16px; }
+
+      .dots {
+        display: flex;
+        gap: 7px;
+      }
+      .dots span {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--rose-line);
+        opacity: 0.35;
+        transition: opacity 0.3s ease;
+      }
+      .dots span.active { opacity: 1; }
+    </style>
+  </head>
+  <body>
+    <div class="stage" id="stage" aria-roledescription="buku undangan">
+      <div class="book" id="book">
+        <!-- Page 1: Cover -->
+        <div class="page" data-index="0">
+          <div class="page-inner">
+            <svg class="ornament" viewBox="0 0 100 40" fill="none"><path d="M2 20 C25 2, 40 2, 50 20 C60 2, 75 2, 98 20" stroke-width="1.4" stroke-linecap="round"/><circle cx="50" cy="20" r="2.4" fill="var(--gold)" stroke="none"/></svg>
+            <p class="kicker">Undangan pernikahan</p>
+            <h1 class="script">Najin &amp; Tasya</h1>
+            <div class="divider"></div>
+            <p>Walimatul Urs</p>
+          </div>
+          <div class="hint">
+            <span>Ketuk untuk membuka</span>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg>
+          </div>
+          <div class="corner"></div>
+        </div>
+
+        <!-- Page 2: Greeting -->
+        <div class="page" data-index="1">
+          <div class="page-inner">
+            <p class="kicker">Assalamualaikum warahmatullahi wabarakatuh</p>
+            <div class="divider"></div>
+            <p>Dengan memohon rahmat dan ridho Allah SWT, kami bermaksud melangsungkan pernikahan:</p>
+            <h2 class="script">Najin &amp; Tasya</h2>
+            <p style="margin-top:1.1em;">"Di antara tanda kasih-Nya, Dia menciptakan pasangan untuk kita, agar hati merasa tenang dan dipenuhi cinta serta kasih sayang."</p>
+          </div>
+          <div class="corner"></div>
+        </div>
+
+        <!-- Page 3: Save the date -->
+        <div class="page" data-index="2">
+          <div class="page-inner">
+            <p class="kicker">Save the date</p>
+            <h1 class="script">Sabtu</h1>
+            <div class="date-badge">12 Desember 2026</div>
+            <div class="event-block">
+              <p class="label">Akad Nikah</p>
+              <p class="detail placeholder">08.00 WIB — lokasi menyusul</p>
+              <p class="label" style="margin-top:0.7em;">Resepsi</p>
+              <p class="detail placeholder">11.00 – 14.00 WIB — lokasi menyusul</p>
+            </div>
+          </div>
+          <div class="corner"></div>
+        </div>
+
+        <!-- Page 4: Closing -->
+        <div class="page" data-index="3">
+          <div class="page-inner">
+            <svg class="ornament" viewBox="0 0 100 40" fill="none"><path d="M2 20 C25 38, 40 38, 50 20 C60 38, 75 38, 98 20" stroke-width="1.4" stroke-linecap="round"/><circle cx="50" cy="20" r="2.4" fill="var(--gold)" stroke="none"/></svg>
+            <p>Merupakan kehormatan dan kebahagiaan bagi kami apabila Bapak/Ibu/Saudara/i berkenan hadir serta memberikan doa restu.</p>
+            <div class="divider"></div>
+            <p style="margin-bottom:0.2em;">Terima kasih atas doa dan kehadirannya</p>
+            <h2 class="script">Najin &amp; Tasya</h2>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="nav">
+      <button id="prevBtn" aria-label="Halaman sebelumnya">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 6l-6 6 6 6"/></svg>
+      </button>
+      <div class="dots" id="dots"></div>
+      <button id="nextBtn" aria-label="Halaman berikutnya">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg>
+      </button>
+    </div>
+
+    <script>
+      (function () {
+        const pages = Array.from(document.querySelectorAll('.page'));
+        const total = pages.length;
+        const dotsEl = document.getElementById('dots');
+        const prevBtn = document.getElementById('prevBtn');
+        const nextBtn = document.getElementById('nextBtn');
+        let current = 0;
+
+        pages.forEach((p, i) => {
+          p.style.zIndex = total - i;
+          const dot = document.createElement('span');
+          dotsEl.appendChild(dot);
+        });
+        const dots = Array.from(dotsEl.children);
+
+        function refreshUI() {
+          prevBtn.disabled = current === 0;
+          nextBtn.disabled = current === total - 1;
+          dots.forEach((d, i) => d.classList.toggle('active', i === current));
+        }
+
+        function goNext() {
+          if (current >= total - 1) return;
+          const page = pages[current];
+          page.classList.add('flipped');
+          const done = () => {
+            page.style.zIndex = -1;
+            page.removeEventListener('transitionend', done);
+          };
+          page.addEventListener('transitionend', done);
+          current++;
+          refreshUI();
+          save();
+        }
+
+        function goPrev() {
+          if (current <= 0) return;
+          current--;
+          const page = pages[current];
+          page.style.zIndex = total - current;
+          page.classList.remove('flipped');
+          refreshUI();
+          save();
+        }
+
+        pages.forEach((p) => p.addEventListener('click', goNext));
+        nextBtn.addEventListener('click', (e) => { e.stopPropagation(); goNext(); });
+        prevBtn.addEventListener('click', (e) => { e.stopPropagation(); goPrev(); });
+
+        document.addEventListener('keydown', (e) => {
+          if (e.key === 'ArrowRight') goNext();
+          if (e.key === 'ArrowLeft') goPrev();
+        });
+
+        let touchStartX = null;
+        document.addEventListener('touchstart', (e) => { touchStartX = e.touches[0].clientX; }, { passive: true });
+        document.addEventListener('touchend', (e) => {
+          if (touchStartX === null) return;
+          const dx = e.changedTouches[0].clientX - touchStartX;
+          if (Math.abs(dx) > 40) { dx < 0 ? goNext() : goPrev(); }
+          touchStartX = null;
+        }, { passive: true });
+
+        function save() {
+          try { localStorage.setItem('undangan-najin-tasya-page', String(current)); } catch (e) {}
+        }
+        function restore() {
+          try {
+            const saved = parseInt(localStorage.getItem('undangan-najin-tasya-page'), 10);
+            if (Number.isInteger(saved) && saved > 0 && saved < total) {
+              for (let i = 0; i < saved; i++) {
+                pages[i].classList.add('flipped');
+                pages[i].style.zIndex = -1;
+              }
+              current = saved;
+            }
+          } catch (e) {}
+        }
+
+        restore();
+        refreshUI();
+      })();
+    </script>
+  </body>
+</html>
