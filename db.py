@@ -384,6 +384,33 @@ def _m5_content_tables(cursor):
     ''')
 
 
+@migration(6)
+def _m6_checkout(cursor):
+    """Phase 4: payment settings + checkout columns on orders.
+
+    * ``settings`` holds admin-editable payment details (bank name/number/
+      holder, QRIS image path) as key/value rows.
+    * ``orders.payment_unique_code`` is the 3-digit code unique among orders
+      awaiting payment; ``payment_deadline`` drives the lazy 24h cancel.
+    * ``orders.discount`` snapshots the template discount at checkout time.
+    """
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL DEFAULT '',
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    _add_column(cursor, 'orders', 'payment_unique_code', "TEXT")
+    _add_column(cursor, 'orders', 'payment_deadline', "TEXT")
+    _add_column(cursor, 'orders', 'discount', "TEXT DEFAULT ''")
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_payment_code"
+        " ON orders (payment_unique_code)"
+        " WHERE payment_unique_code IS NOT NULL"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Seed data
 # ---------------------------------------------------------------------------
@@ -499,6 +526,20 @@ def _seed_data(cursor):
 # Entry points
 # ---------------------------------------------------------------------------
 
+def _seed_settings(cursor):
+    """Idempotent defaults for the settings table (admin can edit later)."""
+    defaults = [
+        ("bank_name", "BCA"),
+        ("bank_number", "1234567890"),
+        ("bank_holder", "SUKA MOTO"),
+        ("qris_path", ""),
+    ]
+    for key, value in defaults:
+        cursor.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?)"
+            " ON CONFLICT(key) DO NOTHING", (key, value))
+
+
 def init_db():
     """Back up (if needed), migrate and seed the database. Idempotent."""
     conn = get_conn()
@@ -506,6 +547,7 @@ def init_db():
         migrate(conn)
         cursor = conn.cursor()
         _seed_data(cursor)
+        _seed_settings(cursor)
         conn.commit()
     finally:
         conn.close()
