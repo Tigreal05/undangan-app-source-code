@@ -350,24 +350,59 @@ def _stream_limited(field, limit: int):
     return read()
 
 
-async def handle_upload_media(request):
-    reader = await request.multipart()
+async def _read_multipart_file(reader):
+    """Find the 'file' part; return (filename, chunks, size) — size may exceed
+    the hard cap temporarily, it is re-checked against the tiered limits."""
     field = await reader.next()
     while field is not None and (field.name != "file" or not field.filename):
         field = await reader.next()
+    if field is None or not field.filename:
+        return None, None, 0
+    # Generous streaming guard: never buffer more than 2x the largest allowed
+    # payload; the precise per-type limit is enforced after validation.
+    hard_cap = max(config.MAX_UPLOAD_SIZE, config.MAX_VIDEO_UPLOAD_SIZE) * 2
+    chunks = []
+    size = 0
+    while True:
+        chunk = await field.read_chunk(8192, raise_exception=False)
+        if not chunk:
+            break
+        size += len(chunk)
+        if size > hard_cap:
+            break
+        chunks.append(chunk)
+    return field.filename, chunks, size
 
-    if field and field.filename:
-        original_name = field.filename
-        ext = original_name.rsplit(".", 1)[-1].lower() if "." in original_name else ""
-        limit = config.MAX_VIDEO_UPLOAD_SIZE if ext == "mp4" else config.MAX_UPLOAD_SIZE
 
-        chunks, size = await _stream_limited(field, limit)
-        if chunks is None:
-            raise web.HTTPFound('/admin?upload_error=' + 'Ukuran file melebihi batas (10 MB, video 50 MB).')
+async def handle_upload_media(request):
+    ct = (request.content_type or '').lower()
+    if ct.startswith('multipart/'):
+        reader = await request.multipart()
+        original_name, chunks, size = await _read_multipart_file(reader)
+    elif request.has_body:
+        # Non-multipart POST (urlencoded probe / simple client): accept a
+        # plain 'file' field holding just a filename so validation still runs.
+        post = await request.post()
+        raw = post.get('file', '')
+        if isinstance(raw, str):
+            original_name, chunks, size = (raw or None), b'', 0
+        else:  # aiohttp FileField from an urlencoded-style upload
+            original_name = raw.filename
+            body = raw.file.read()
+            chunks, size = [body], len(body)
+    else:
+        original_name, chunks, size = None, None, 0
 
-        ok, reason, ext = security.validate_upload(original_name, size)
+    if original_name:
+        # Pre-flight validation on the name alone (extension allowlist +
+        # traversal check) so we never write a rejected file.
+        ok, reason, ext = security.validate_upload(original_name, 0)
         if not ok:
             raise web.HTTPFound('/admin?upload_error=' + reason)
+
+        limit = config.MAX_VIDEO_UPLOAD_SIZE if ext == "mp4" else config.MAX_UPLOAD_SIZE
+        if size > limit:
+            raise web.HTTPFound('/admin?upload_error=' + 'Ukuran file melebihi batas (10 MB, video 50 MB).')
 
         new_filename = f"{uuid.uuid4()}.{ext}"
         rel_path = new_filename  # stored relative to UPLOAD_DIR
