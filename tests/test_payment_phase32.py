@@ -227,24 +227,35 @@ async def test_method_selection_ownership_and_validation(aiohttp_client):
 
 @pytest.mark.asyncio
 async def test_valid_proofs_accepted_and_mark_submitted(aiohttp_client):
-    client = await aiohttp_client(create_app())
-    _, code = await _confirmed_order(client)
+    """JPG / PNG / WEBP with correct magic bytes are accepted; each valid
+    submission marks the payment 'submitted' and records submitted_at."""
+    from aiohttp import FormData
+    for blob, fname in (("jpg", JPG_BYTES), ("png", PNG_BYTES), ("webp", WEBP_BYTES)):
+        client = await aiohttp_client(create_app())
+        _, code = await _confirmed_order(client)   # fresh order per format
 
-    for fname, blob in (("bukti.jpg", JPG_BYTES), ("bukti.png", PNG_BYTES),
-                        ("bukti.webp", WEBP_BYTES)):
-        if fname != "bukti.jpg":
-            # Duplicate submissions after the first success are rejected
-            # deterministically (order already payment_reported).
-            r = await client.post("/payment/proof", data={
-                "order": code,
-                "file": (blob, fname)},
-                headers={"Content-Type": None}) if False else None
-            break
+        form = FormData()
+        form.add_field("order", code)
+        form.add_field("file", blob, filename=f"bukti.{fname}")
+        r = await client.post("/payment/proof", data=form, allow_redirects=False)
+        assert r.status == 303, (fname, r.status)
 
-    r = await client.post("/payment/proof", data={
-        "order": code, "file": PNG_BYTES})
-    # aiohttp test client needs proper multipart for file uploads:
-    assert r.status in (400, 422)               # non-multipart rejected safely
+        conn = _conn()
+        pay = conn.execute(
+            "SELECT p.status, p.submitted_at FROM payments p"
+            " JOIN orders o ON o.id = p.order_id WHERE o.code = ?",
+            (code,)).fetchone()
+        inv_state = conn.execute(
+            "SELECT i.state FROM invitations i"
+            " JOIN orders o ON o.id = i.order_id WHERE o.code = ?",
+            (code,)).fetchone()[0]
+        ord_status = conn.execute(
+            "SELECT status FROM orders WHERE code = ?", (code,)).fetchone()[0]
+        conn.close()
+        assert pay[0] == "submitted"
+        assert pay[1]                                   # submitted_at recorded
+        assert ord_status == orders_svc.PAYMENT_REPORTED
+        assert inv_state == "draft"                     # never published here
 
 
 @pytest.mark.asyncio
@@ -383,10 +394,20 @@ async def test_oversized_proof_rejected(aiohttp_client):
 async def test_malformed_upload_payload_rejected(aiohttp_client):
     client = await aiohttp_client(create_app())
     _, code = await _confirmed_order(client)
+    # urlencoded body (no file part / not multipart) -> rejected safely with
+    # a structured JSON error before any storage or payment state change.
     r = await client.post("/payment/proof", data={"order": code})
-    assert r.status == 422                                # no file part
+    assert r.status == 400
+    j = await r.json()
+    assert j["ok"] is False
     r = await client.post("/payment/proof", data={"file": b"x"})
     assert r.status == 400                                # no order field
+    conn = _conn()
+    n_pay = conn.execute("SELECT COUNT(*) FROM payments").fetchone()[0]
+    st = conn.execute("SELECT status FROM orders WHERE code = ?", (code,)).fetchone()[0]
+    conn.close()
+    assert n_pay == 0                                     # no payment created
+    assert st == orders_svc.PENDING_PAYMENT               # order untouched
 
 
 # ---------------------------------------------------------------------------
@@ -444,9 +465,12 @@ async def test_duplicate_submission_is_deterministic(aiohttp_client):
 
     conn = _conn()
     assert conn.execute("SELECT COUNT(*) FROM payments").fetchone()[0] == 1
-    paths = conn.execute("SELECT proof_path FROM payments").fetchall()
+    stored_path = conn.execute("SELECT proof_path FROM payments").fetchone()[0]
     conn.close()
-    assert paths[0][1].endswith("first.png") is False     # stored name unchanged
+    # Server-generated name: original filename must never be used on disk.
+    assert "first" not in stored_path
+    assert stored_path.startswith("payment-proof/")
+    assert os.path.basename(stored_path).startswith("payment_")
 
 
 # ---------------------------------------------------------------------------
