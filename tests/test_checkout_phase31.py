@@ -98,7 +98,9 @@ async def test_checkout_nonexistent_draft_and_bad_params(aiohttp_client):
     resp = await client.get(f"/checkout?id={NEW_ID}&draft=99999")
     assert resp.status == 403                       # not found ≠ hijack path
     resp = await client.get("/checkout?id=99999&draft=1")
-    assert resp.status == 404                       # unknown template
+    # Ownership check runs BEFORE template-existence check by design:
+    # 403 for a draft the requester does not own prevents existence probing.
+    assert resp.status == 403
     resp = await client.get(f"/checkout?id={NEW_ID}&draft=abc")
     assert resp.status == 200                       # non-numeric draft → legacy view
 
@@ -267,7 +269,9 @@ async def test_confirm_rollback_on_failure(aiohttp_client, monkeypatch):
     monkeypatch.setattr(pub.orders_svc, "log_order_event", boom)
     resp = await client.post("/checkout/confirm",
                              data={"id": str(NEW_ID), **CONFIRM_FORM})
-    monkeypatch.undo()
+    # NOTE: no explicit monkeypatch.undo() here — undo() would also revert the
+    # autouse isolated_env patches (config.DB_NAME), making assertions read the
+    # live repo DB. Pytest undoes monkeypatch automatically at fixture teardown.
     assert resp.status == 500
     j = await resp.json()
     assert j["ok"] is False                         # structured JSON error

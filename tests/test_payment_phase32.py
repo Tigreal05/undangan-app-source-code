@@ -516,7 +516,9 @@ async def test_proof_submission_rolls_back_together(aiohttp_client, monkeypatch)
     form.add_field("order", code)
     form.add_field("file", PNG_BYTES, filename="a.png")
     r = await client.post("/payment/proof", data=form)
-    monkeypatch.undo()
+    # NOTE: no explicit monkeypatch.undo() here — undo() would also revert the
+    # autouse isolated_env patches (config.DB_NAME), making assertions read the
+    # live repo DB. Pytest undoes monkeypatch automatically at fixture teardown.
 
     assert r.status == 500
     j = await r.json()

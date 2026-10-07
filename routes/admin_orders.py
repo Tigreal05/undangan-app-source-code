@@ -1,11 +1,26 @@
-"""Admin order workflow (Phase 5).
+"""Admin order workflow (Phase 5 + Phase 3.3 verification slice).
 
 * ``/admin/orders``            inbox with status/tier filters + unread badge
+                               (Phase 3.3 rows additionally show the live
+                               payments.status for the verification queue)
 * ``/admin/orders/{id}``       detail: client info, form data, preview iframe,
                                payment proof, actions (confirm / reject / publish)
+* ``/admin/payments/{id}/proof``  authenticated-only proof serving — the DB
+                               stores only a relative path; the browser never
+                               supplies a filesystem path (no arbitrary read)
 * ``/admin/api/notifications/unread``  polled every 15 s by the dashboard JS
 * ``/admin/orders/{id}/notify-payment``  wa.me link to ADMIN (prefilled report)
 * POST confirm-payment / reject / publish / mark-read
+
+Phase 3.3 (admin payment verification) hardening:
+* approve/reject are guarded ATOMIC transactions — the payment flip uses a
+  conditional UPDATE (WHERE status='submitted') and the order moves through
+  the EXISTING state machine in the same transaction; any failure rolls both
+  back (no half-verified state);
+* amounts are always re-derived from the order row (never admin/browser
+  input); idempotency is deterministic: already-final states return 409;
+* every action is recorded in ``order_events`` (actor=admin, action,
+  from/to status, timestamp) via the existing audit mechanism.
 
 Every status change goes through ``orders.transition()`` (which appends an
 ``order_events`` row), and each admin action additionally logs a dedicated
@@ -27,8 +42,15 @@ from db import get_conn
 from routes.common import render
 from services import notify as notify_svc
 from services import orders as orders_svc
+from services import payments as payments_svc
 from services import render as render_svc
 from services import tiers as tiers_svc
+
+#: Payment statuses owned by the Phase 3.3 admin verification flow. The
+#: customer flow (Phase 3.2) only ever produces 'pending'/'submitted';
+#: 'verified'/'rejected' may ONLY be written by guarded admin actions.
+PAYMENT_VERIFIED = "verified"
+PAYMENT_REJECTED = "rejected"
 
 STATUS_LABELS = {
     orders_svc.DRAFT: "Dibuat",
@@ -94,19 +116,45 @@ def _invitation_for_order(cursor, order_id):
 
 
 def _latest_payment_proof(cursor, order_id):
-    """Return (payment_id, absolute path or None, method, amount, status)."""
+    """Return (payment_id, absolute path or None, method, amount, status).
+
+    Phase 3.3: the verification queue acts on the SUBMITTED attempt — the
+    newest payment row still awaiting a decision. Historical verified /
+    rejected rows stay visible for the audit trail but are never picked up
+    by approve/reject (guarded UPDATEs match on the submitted row id only).
+    """
     cursor.execute(
         'SELECT id, method, amount, proof_path, status FROM payments'
-        ' WHERE order_id = ? ORDER BY id DESC LIMIT 1', (order_id,))
+        " WHERE order_id = ? AND status = ?"
+        ' ORDER BY id DESC LIMIT 1', (order_id, payments_svc.SUBMITTED))
     row = cursor.fetchone()
-    if not row:
-        return None
+    if row is None:
+        # No pending decision — fall back to the most recent attempt so the
+        # admin detail page can still show its proof/reference (read-only).
+        cursor.execute(
+            'SELECT id, method, amount, proof_path, status FROM payments'
+            ' WHERE order_id = ? ORDER BY id DESC LIMIT 1', (order_id,))
+        row = cursor.fetchone()
+        if row is None:
+            return None
     pid, method, amount, proof_path, status = row
     abs_path = security_safe_path(proof_path) if proof_path else None
+    cursor.execute('SELECT reference, submitted_at FROM payments WHERE id = ?',
+                   (pid,))
+    meta_row = cursor.fetchone()
+    prov = payments_svc.parse_provenance(
+        {"reference": (meta_row[0] if meta_row else "") or ""})
     return {
         "id": pid, "method": method, "amount": amount, "status": status,
         "proof_abs": abs_path,
         "proof_url": f"/admin/payments/{pid}/proof" if proof_path else "",
+        # Phase 3.3 detail extras — provenance is decoded server-side; the
+        # raw filesystem path is NEVER exposed to the browser.
+        "reference": ((meta_row[0] if meta_row else "") or ""),
+        "submitted_at": ((meta_row[1] if meta_row else "") or ""),
+        "original_name": str(prov.get("original_name") or ""),
+        "mime": str(prov.get("mime") or ""),
+        "size": int(prov.get("size") or 0),
     }
 
 
@@ -114,6 +162,43 @@ def security_safe_path(rel_path: str):
     """Resolve a stored relative path inside UPLOAD_DIR, blocking traversal."""
     import security
     return security.safe_upload_path(rel_path or "")
+
+
+def _redact_reference(raw: str) -> str:
+    """Human-safe reference for the detail page (Phase 3.3).
+
+    PROOF:<json> provenance blobs are replaced by the decoded original file
+    name; anything else is shown as-is. The stored filesystem path NEVER
+    reaches the browser either way.
+    """
+    raw = str(raw or "")
+    prov = payments_svc.parse_provenance({"reference": raw})
+    if prov:
+        return os.path.basename(str(prov.get("original_name") or ""))[:120]
+    return raw[:80]
+
+
+def _proof_provenance(cursor, payment_id) -> dict:
+    """Decode the server-side proof provenance for one payment row (Phase 3.3).
+
+    The browser NEVER supplies a filesystem path: only the payments.proof_path
+    recorded by Phase 3.2 is resolved through safe_upload_path() (traversal
+    blocked), and the reference column carries the packed PROOF:<json>
+    provenance (original name / mime / size). Returns {} when nothing valid
+    is stored.
+    """
+    cursor.execute(
+        'SELECT reference FROM payments WHERE id = ?', (payment_id,))
+    row = cursor.fetchone()
+    if not row:
+        return {}
+    info = payments_svc.parse_provenance({"reference": row[0]})
+    original = os.path.basename(str(info.get("original_name") or ""))[:120]
+    return {
+        "original_name": original,
+        "mime": str(info.get("mime") or ""),
+        "size": int(info.get("size") or 0),
+    }
 
 
 def _form_data_summary(cursor, order_id):
@@ -280,12 +365,30 @@ ORDER_ROW_HTML = """
     <td>{{ buyer }}<br><span style="color:#71717a; font-size:10px;">{{ wha }}</span></td>
     <td>{{ tier_name }}</td>
     <td>{{ badge }}</td>
+    {% if pay_status %}<td style="font-size:10px;">{{ pay_status }}</td>{% endif %}
     <td style="color:#a1a1aa; font-size:10px;">{{ created }}</td>
     <td>
         <a class="wa" href="{{ wa_admin_link }}" target="_blank" rel="noopener">WA Laporkan</a>
     </td>
 </tr>
 """
+
+
+def _payment_statuses_by_order(cursor, order_ids):
+    """Map order_id -> live payments.status for the listing (Phase 3.3).
+
+    One batched query per page (no N+1). The status shown is the newest
+    payment attempt per order — exactly what the verification queue needs
+    ('submitted' rows are the ones awaiting approve/reject).
+    """
+    if not order_ids:
+        return {}
+    placeholders = ",".join("?" for _ in order_ids)
+    cursor.execute(
+        f"SELECT order_id, status FROM payments WHERE id IN ("
+        f" SELECT MAX(id) FROM payments WHERE order_id IN ({placeholders})"
+        " GROUP BY order_id)", tuple(order_ids))
+    return {row[0]: row[1] for row in cursor.fetchall()}
 
 
 async def handle_orders_page(request):
@@ -307,6 +410,9 @@ async def handle_orders_page(request):
     sql += " ORDER BY o.id DESC LIMIT 200"
     cursor.execute(sql, params)
     orders = cursor.fetchall()
+    # Phase 3.3: annotate each row with its live payment status so the
+    # verification queue (payment_reported + submitted) is scannable.
+    pay_map = _payment_statuses_by_order(cursor, [o[0] for o in orders])
 
     unread = orders_svc.unread_notifications(conn, limit=100)
     conn.close()
@@ -324,7 +430,9 @@ async def handle_orders_page(request):
         rows_html += render(
             ORDER_ROW_HTML, oid=oid, ocode=code, buyer=buyer or "-",
             wha=wha or "-", tier_name=tname_,
-            badge=Markup(status_badge(status)), created=created or "",
+            badge=Markup(status_badge(status)),
+            pay_status=pay_map.get(oid, ""),
+            created=created or "",
             wa_admin_link=notify_svc.wa_link(config.ADMIN_WHATSAPP, wa_text))
     if not rows_html:
         rows_html = ('<tr><td colspan="6" class="empty">'
@@ -457,6 +565,15 @@ DETAIL_HTML = """
     {% if proof %}
     <div class="card">
         <h3>Bukti Pembayaran ({{ proof_status }})</h3>
+        {% if proof_reference %}
+        <div class="kv"><span>Referensi</span><strong>{{ proof_reference }}</strong></div>
+        {% endif %}
+        {% if proof_submitted_at %}
+        <div class="kv"><span>Dikirim</span><strong>{{ proof_submitted_at }}</strong></div>
+        {% endif %}
+        {% if proof_amount %}
+        <div class="kv"><span>Nominal (authoritative)</span><strong>{{ proof_amount }}</strong></div>
+        {% endif %}
         {% if proof_img_ok %}
         <img class="proof" src="{{ proof_url }}" alt="Bukti pembayaran">
         {% else %}
@@ -669,6 +786,11 @@ async def handle_order_detail(request):
         proof_status=(proof or {}).get("status", ""),
         proof_url=(proof or {}).get("proof_url", ""),
         proof_img_ok=bool(proof and proof.get("proof_abs")),
+        # Phase 3.3: verification metadata (server-derived; no raw paths).
+        proof_reference=_redact_reference((proof or {}).get("reference", "")),
+        proof_submitted_at=(proof or {}).get("submitted_at", ""),
+        proof_amount=(proof or {}).get("amount", ""),
+        proof_original_name=(proof or {}).get("original_name", ""),
         form_rows=form_rows,
         preview_srcdoc=preview_srcdoc,
         wa_admin_link=notify_svc.wa_link(config.ADMIN_WHATSAPP, wa_text),
@@ -680,11 +802,20 @@ async def handle_order_detail(request):
 
 
 async def handle_payment_proof(request):
-    """Serve the uploaded proof image — only to authenticated admins."""
+    """Serve the uploaded proof image — only to authenticated admins.
+
+    Phase 3.3 hardening: the payment row must belong to a REAL order (the
+    browser supplies only a numeric id; the path itself comes from the DB),
+    so foreign / fabricated ids cannot be used for IDOR-style reads and raw
+    filesystem paths are never accepted as input.
+    """
     payment_id = request.match_info['id']
     conn = get_conn()
     cursor = conn.cursor()
-    cursor.execute('SELECT proof_path FROM payments WHERE id = ?', (payment_id,))
+    cursor.execute(
+        'SELECT p.proof_path FROM payments p'
+        ' JOIN orders o ON o.id = p.order_id'
+        ' WHERE p.id = ?', (payment_id,))
     row = cursor.fetchone()
     conn.close()
     if not row or not row[0]:
@@ -699,71 +830,162 @@ async def handle_payment_proof(request):
 # Actions
 # ---------------------------------------------------------------------------
 
+def _conflict(order_id, message):
+    """Deterministic already-processed / invalid-state exception (Phase 3.3).
+
+    Returns an HTTPConflict *exception* (never raise/return a plain
+    Response object — aiohttp requires exceptions to derive from
+    BaseException). Handlers `raise` it inside the transaction; the
+    `except web.HTTPException` path closes the connection and re-raises,
+    producing a proper 409 JSON response. The UI flash mechanism
+    (?err=1&msg=...) stays available via X-Flash-Message header without
+    breaking the JSON contract.
+    """
+    exc = web.HTTPConflict(
+        text=json.dumps(
+            {"ok": False, "error": "invalid_state", "message": message}),
+        content_type="application/json")
+    exc.headers["X-Flash-Message"] = message
+    return exc
+
+
+def _active_submitted_payment(cursor, order_id):
+    """The ACTIVE verification attempt for an order: newest submitted row.
+
+    Phase 3.2 mark_submitted() produces status='submitted'; the legacy
+    'pending' guard never matched those rows (silent no-op bug). Rejected /
+    verified history rows are ignored here — approve/reject act on the
+    submitted attempt only.
+    """
+    cursor.execute(
+        "SELECT id, status FROM payments"
+        " WHERE order_id = ? AND status = ?"
+        " ORDER BY id DESC LIMIT 1", (order_id, payments_svc.SUBMITTED))
+    return cursor.fetchone()
+
+
 async def handle_confirm_payment(request):
+    """APPROVE (Phase 3.3): payment submitted->verified, order
+    payment_reported->paid, atomically in ONE transaction.
+
+    Amounts are never read from the browser; state comes from the DB only.
+    Any failure (guarded UPDATE rc!=1, illegal transition, commit error)
+    rolls back payment + order + audit event together.
+    """
     order_id = request.match_info['id']
     conn = get_conn()
-    cursor = conn.cursor()
-    row = _fetch_order(cursor, order_id)
-    if row is None:
-        conn.close()
-        raise web.HTTPNotFound()
-    oid, status = row[0], row[2]
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cursor = conn.cursor()
+        row = _fetch_order(cursor, order_id)
+        if row is None:
+            conn.rollback()
+            raise web.HTTPNotFound()
+        oid, code, status, amount = row[0], row[1], row[2], row[5]
 
-    if status != orders_svc.PAYMENT_REPORTED:
-        conn.close()
-        raise web.HTTPFound(f'/admin/orders/{oid}?err=1&msg=' +
-                            quote('Hanya pesanan "Bukti Diterima" yang bisa dikonfirmasi.'))
+        if status != orders_svc.PAYMENT_REPORTED:
+            conn.rollback()
+            raise _conflict(
+                oid, 'Hanya pesanan "Bukti Diterima" yang bisa dikonfirmasi.')
 
-    orders_svc.transition(conn, oid, orders_svc.PAID,
-                          actor="admin", actor_note="pembayaran dikonfirmasi")
-    cursor.execute(
-        'UPDATE payments SET status = ?, verified_at = ?'
-        ' WHERE order_id = ? AND status = ?',
-        ("verified", datetime.now().strftime("%Y-%m-%d %H:%M:%S"), oid, "pending"))
-    cursor.execute(
-        'UPDATE admin_notifications SET read = 1'
-        " WHERE kind = 'payment_reported'"
-        " AND payload_json LIKE ?", (f'%{row[1]}%',))
-    conn.commit()
-    orders_svc.log_order_event(conn, oid, actor="admin",
-                               action="payment_confirmed",
-                               from_status=status, to_status=orders_svc.PAID)
+        pay = _active_submitted_payment(cursor, oid)
+        if pay is None:
+            conn.rollback()
+            raise _conflict(oid, 'Tidak ada pembayaran submitted untuk diverifikasi.')
+
+        now = orders_svc._now_str()
+        cursor.execute(
+            "UPDATE payments SET status = ?, verified_at = ?, updated_at = ?"
+            " WHERE id = ? AND status = ?",
+            (PAYMENT_VERIFIED, now, now, pay[0], payments_svc.SUBMITTED))
+        if cursor.rowcount != 1:
+            # Lost race against another admin decision — deterministic stop.
+            conn.rollback()
+            raise _conflict(oid, 'Pembayaran sudah diproses (already verified).')
+
+        orders_svc.transition(conn, oid, orders_svc.PAID, actor="admin",
+                              actor_note="pembayaran dikonfirmasi", commit=False)
+        orders_svc.log_order_event(conn, oid, actor="admin",
+                                   action="approve", from_status=status,
+                                   to_status=orders_svc.PAID,
+                                   note=f"amount={amount}", commit=False)
+        cursor.execute(
+            'UPDATE admin_notifications SET read = 1'
+            " WHERE kind = 'payment_reported'"
+            " AND payload_json LIKE ?", (f'%{code}%',))
+        conn.commit()
+    except web.HTTPException:
+        conn.close()
+        raise
+    except Exception:
+        conn.rollback()
+        conn.close()
+        raise web.HTTPInternalServerError(
+            text=json.dumps({"ok": False, "error": "server_error",
+                             "message": "Gagal mengonfirmasi pembayaran."}),
+            content_type="application/json")
     conn.close()
     raise web.HTTPFound(f'/admin/orders/{oid}?msg=' +
                         quote('Pembayaran dikonfirmasi. Silakan publish undangan.'))
 
 
 async def handle_reject_payment(request):
+    """REJECT (Phase 3.3): payment submitted->rejected, order
+    payment_reported->pending_payment (customer may re-submit a new proof
+    through the unchanged Phase 3.2 flow), atomically in ONE transaction."""
     order_id = request.match_info['id']
     data = await request.post()
     reason = (data.get('reason') or '').strip()
     conn = get_conn()
-    cursor = conn.cursor()
-    row = _fetch_order(cursor, order_id)
-    if row is None:
-        conn.close()
-        raise web.HTTPNotFound()
-    oid, status = row[0], row[2]
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cursor = conn.cursor()
+        row = _fetch_order(cursor, order_id)
+        if row is None:
+            conn.rollback()
+            raise web.HTTPNotFound()
+        oid, status = row[0], row[2]
 
-    if not reason:
-        conn.close()
-        raise web.HTTPFound(f'/admin/orders/{oid}?err=1&msg=' +
-                            quote('Alasan penolakan wajib diisi.'))
-    if status != orders_svc.PAYMENT_REPORTED:
-        conn.close()
-        raise web.HTTPFound(f'/admin/orders/{oid}?err=1&msg=' +
-                            quote('Pesanan tidak berada pada status Bukti Diterima.'))
+        if not reason:
+            conn.rollback()
+            raise _conflict(oid, 'Alasan penolakan wajib diisi.')
+        if status != orders_svc.PAYMENT_REPORTED:
+            conn.rollback()
+            raise _conflict(oid, 'Pesanan tidak berada pada status Bukti Diterima.')
 
-    # payment_reported -> pending_payment (client may re-report a valid proof)
-    orders_svc.transition(conn, oid, orders_svc.PENDING_PAYMENT,
-                          actor="admin", actor_note=f"penolakan: {reason}")
-    cursor.execute(
-        'UPDATE payments SET status = ? WHERE order_id = ? AND status = ?',
-        ("rejected", oid, "pending"))
-    conn.commit()
-    orders_svc.log_order_event(conn, oid, actor="admin", action="payment_rejected",
-                               from_status=status, to_status=orders_svc.PENDING_PAYMENT,
-                               note=reason)
+        pay = _active_submitted_payment(cursor, oid)
+        if pay is None:
+            conn.rollback()
+            raise _conflict(oid, 'Tidak ada pembayaran submitted untuk ditolak.')
+
+        now = orders_svc._now_str()
+        cursor.execute(
+            "UPDATE payments SET status = ?, updated_at = ?"
+            " WHERE id = ? AND status = ?",
+            (PAYMENT_REJECTED, now, pay[0], payments_svc.SUBMITTED))
+        if cursor.rowcount != 1:
+            conn.rollback()
+            raise _conflict(oid, 'Pembayaran sudah diproses (already rejected).')
+
+        # payment_reported -> pending_payment (existing state-machine edge)
+        orders_svc.transition(conn, oid, orders_svc.PENDING_PAYMENT,
+                              actor="admin", actor_note=f"penolakan: {reason}",
+                              commit=False)
+        orders_svc.log_order_event(conn, oid, actor="admin",
+                                   action="reject", from_status=status,
+                                   to_status=orders_svc.PENDING_PAYMENT,
+                                   note=reason, commit=False)
+        conn.commit()
+    except web.HTTPException:
+        conn.close()
+        raise
+    except Exception:
+        conn.rollback()
+        conn.close()
+        raise web.HTTPInternalServerError(
+            text=json.dumps({"ok": False, "error": "server_error",
+                             "message": "Gagal menolak pembayaran."}),
+            content_type="application/json")
     conn.close()
     raise web.HTTPFound(f'/admin/orders/{oid}?msg=' +
                         quote(f"Pembayaran ditolak: {reason}"))
