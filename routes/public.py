@@ -17,6 +17,7 @@ from db import get_conn
 from routes.common import BASE_HEAD, FOOTER_HTML, NAV_SCRIPT, render
 from services import editor_schema as editor_svc
 from services import orders as orders_svc
+from services import payments as payments_svc
 from services import render as render_svc
 from services import template_resolver as resolver_svc
 from services.tiers import duration_label as _tier_duration, get_tier
@@ -1414,10 +1415,13 @@ async def handle_checkout_status(request):
                 <div class="st-box">
                     <p style="font-size:12px; color:#a1a1aa;">
                         Pembayaran Anda <strong style="color:#fbbf24;">belum dikonfirmasi</strong>.
-                        Transfer sesuai total + kode unik ke rekening yang tertera pada halaman checkout.
-                        Konfirmasi pembayaran akan tersedia pada tahap berikutnya.
+                        Buka halaman pembayaran untuk melihat instruksi QRIS / transfer bank
+                        dan mengunggah bukti pembayaran.
                     </p>
-                    <a href="/editor?id={{ tmpl_id }}" style="display:inline-block; margin-top:10px; background:#fbbf24; color:#000; padding:8px 14px; border-radius:8px; font-size:12px; font-weight:bold; text-decoration:none;">Kembali ke Editor</a>
+                    <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:10px;">
+                        <a href="/payment?order={{ oc }}" style="display:inline-block; background:#34d399; color:#000; padding:8px 14px; border-radius:8px; font-size:12px; font-weight:bold; text-decoration:none;">Bayar Sekarang &rarr;</a>
+                        <a href="/editor?id={{ tmpl_id }}" style="display:inline-block; background:#fbbf24; color:#000; padding:8px 14px; border-radius:8px; font-size:12px; font-weight:bold; text-decoration:none;">Kembali ke Editor</a>
+                    </div>
                 </div>
             </div>
             {{ footer_html }}
@@ -1432,6 +1436,374 @@ async def handle_checkout_status(request):
         footer_html=Markup(FOOTER_HTML),
     )
     return web.Response(text=html_content, content_type='text/html')
+
+
+# ---------------------------------------------------------------------------
+# Phase 3.2 — customer payment submission (QRIS / bank transfer + proof)
+# ---------------------------------------------------------------------------
+
+PAYMENT_METHOD_LABELS = {"qris": "QRIS", "bank_transfer": "Transfer Bank"}
+
+
+def _owned_order_row(cursor, token, order_code):
+    """Fetch an order the CURRENT editing context owns (same cookie-token
+    ownership rule as /checkout/status). Returns row tuple or None."""
+    cursor.execute(
+        "SELECT o.id, o.code, o.status, o.buyer_name, o.amount,"
+        " o.payment_method, o.payment_unique_code, o.payment_deadline,"
+        " t.name, o.template_id"
+        " FROM orders o"
+        " LEFT JOIN templates t ON t.id = o.template_id"
+        " WHERE o.code = ?", (str(order_code),))
+    row = cursor.fetchone()
+    if row is None:
+        return None
+    owned = cursor.execute(
+        "SELECT 1 FROM invitations WHERE order_id = ?"
+        " AND json_extract(content_json, '$._meta.token') = ? LIMIT 1",
+        (row[0], token)).fetchone()
+    return row if owned else None
+
+
+async def handle_payment_page(request):
+    """GET /payment?order=<code> — instructions + proof upload for the owner.
+
+    Authorization reuses the Phase 3.1 draft-identity mechanism (HttpOnly
+    suka_draft_token cookie matched against content_json._meta.token).
+    Amounts always come from the authoritative order row — never client input.
+    """
+    code = request.query.get('order', '')
+    if not code or len(str(code)) > 32:
+        return web.Response(text="Pesanan tidak ditemukan", status=404)
+
+    token = _draft_identity(request)
+    conn = get_conn()
+    try:
+        cursor = conn.cursor()
+        orders_svc.apply_lazy_expiry(conn)
+        row = _owned_order_row(cursor, token, code)
+        if row is None:
+            exists = cursor.execute(
+                "SELECT 1 FROM orders WHERE code = ?", (str(code),)).fetchone()
+            return web.json_response(
+                {"ok": False, "error": "Pesanan tidak ditemukan atau bukan milik Anda."},
+                status=404 if not exists else 403)
+        oid, oc, status, buyer, amount, method_db, puc, deadline, tname_, tmpl_id = row
+
+        if status == orders_svc.DRAFT:
+            return web.json_response(
+                {"ok": False, "error": "Pesanan belum dikonfirmasi. Selesaikan checkout terlebih dahulu."},
+                status=409)
+        if status not in (orders_svc.PENDING_PAYMENT, orders_svc.PAYMENT_REPORTED):
+            return web.json_response(
+                {"ok": False, "error": f"Pembayaran tidak tersedia untuk status '{status}'."},
+                status=409)
+
+        settings = orders_svc.get_settings(conn)
+        payment = payments_svc.get_active_payment(cursor, oid)
+        provenance = payments_svc.parse_provenance(payment) if payment else {}
+        server_total = payments_svc.order_total(conn, oid)
+    finally:
+        conn.close()
+
+    # Server-rendered methods from configuration only; no client control.
+    qris_img = ""
+    if settings.get("qris_path"):
+        qris_img = security_safe_upload_url(settings["qris_path"])
+    method_cards = []
+    if qris_img:
+        method_cards.append(("qris", "QRIS",
+                             f'<img src="{qris_img}" alt="Kode QRIS" '
+                             'style="max-width:220px; border-radius:12px; background:#fff; padding:8px;">'
+                             f'<p style="font-size:11px; color:#a1a1aa;">Merchant: '
+                             f'{_html_esc(settings.get("bank_holder") or "SUKA MOTO")}</p>'))
+    method_cards.append(("bank_transfer", "Transfer Bank",
+                         f'<div class="pm-row"><span>Bank</span><strong>{_html_esc(settings.get("bank_name") or "-")}</strong></div>'
+                         f'<div class="pm-row"><span>No. Rekening</span><strong>{_html_esc(settings.get("bank_number") or "-")}</strong></div>'
+                         f'<div class="pm-row"><span>a.n</span><strong>{_html_esc(settings.get("bank_holder") or "-")}</strong></div>'))
+    cards_html = "".join(
+        f'<div class="pm-card"><h4 style="color:#fbbf24; font-size:13px; margin-bottom:8px;">{label}</h4>{body}</div>'
+        for _, label, body in method_cards)
+
+    status_note = ""
+    if status == orders_svc.PAYMENT_REPORTED:
+        status_note = ('<p style="font-size:12px; color:#38bdf8; font-weight:bold;">'
+                       '✓ Bukti pembayaran berhasil dikirim.</p>'
+                       '<p style="font-size:12px; color:#a1a1aa;">'
+                       'Status: Menunggu verifikasi pembayaran oleh admin.</p>')
+    elif payment and payment["status"] == payments_svc.SUBMITTED:
+        status_note = ('<p style="font-size:12px; color:#a1a1aa;">Bukti sudah diunggah. '
+                       'Menunggu verifikasi admin.</p>')
+
+    uploaded_info = ""
+    if provenance:
+        uploaded_info = (f'<p style="font-size:11px; color:#71717a; margin-top:8px;">'
+                         f'Terakhir: {_html_esc(provenance.get("original_name", ""))} '
+                         f'({_html_esc(provenance.get("mime", ""))}, '
+                         f'{int(provenance.get("size", 0)) // 1024} KB)</p>')
+
+    html_content = render("""
+    <!DOCTYPE html>
+    <html lang="id">
+    <head>
+        {{ base_head }}
+        <style>
+            .pm-box { background: #18181b; border: 1px solid #27272a; border-radius: 12px; padding: 20px; margin-top: 15px; }
+            .pm-row { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 8px; color: #a1a1aa; }
+            .pm-card { border: 1px solid #27272a; border-radius: 10px; padding: 14px; margin-top: 12px; }
+            .pm-btn { display:block; width:100%; background:#34d399; color:#000; font-weight:bold; padding:12px; border-radius:8px; border:none; margin-top:15px; cursor:pointer; text-align:center; font-size:13px; }
+            input[type=file] { background:#121215; color:#fff; padding:8px; border-radius:8px; border:1px solid #3f3f46; width:100%; font-size:12px; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="content-wrap">
+                <div class="navbar">
+                    <a href="/" class="brand-group">
+                        <span class="brand-main">SUKA MOTO</span>
+                        <span class="brand-sub">Invitation</span>
+                    </a>
+                </div>
+                <div class="section-title">Pembayaran Pesanan</div>
+                {% if err %}<div class="pm-box" style="border-color:#ef4444;"><p style="font-size:12px; color:#ef4444;">{{ err }}</p></div>{% endif %}
+                <div class="pm-box">
+                    <div class="pm-row"><span>Kode Pesanan</span><strong style="color:#fff;">{{ oc }}</strong></div>
+                    <div class="pm-row"><span>Pemesan</span><strong style="color:#fff;">{{ buyer }}</strong></div>
+                    <div class="pm-row"><span>Template</span><strong style="color:#fff;">{{ tname_ }}</strong></div>
+                    <div class="pm-row"><span>Status Pesanan</span><strong style="color:#fbbf24;">{{ status_label }}</strong></div>
+                    <div class="pm-row"><span>Total Pembayaran</span><strong style="color:#34d399;">{{ total_label }}</strong></div>
+                    {% if puc %}<div class="pm-row"><span>Kode Unik</span><strong style="color:#fbbf24;">{{ puc }}</strong></div>{% endif %}
+                    {% if deadline %}<div class="pm-row"><span>Batas Bayar</span><strong style="color:#fff;">{{ deadline }}</strong></div>{% endif %}
+                </div>
+                <div class="pm-box">
+                    <h3 style="font-size:14px; color:#fff; margin-bottom:4px;">Metode Pembayaran</h3>
+                    <p style="font-size:11px; color:#a1a1aa;">Silakan lakukan pembayaran sesuai metode yang dipilih, kemudian upload bukti pembayaran.</p>
+                    {{ cards_html }}
+                </div>
+                <div class="pm-box">
+                    <h3 style="font-size:14px; color:#fff; margin-bottom:10px;">Upload Bukti Pembayaran</h3>
+                    {{ status_note }}
+                    <form action="/payment/proof" method="POST" enctype="multipart/form-data">
+                        <input type="hidden" name="order" value="{{ oc }}">
+                        <input type="file" name="file" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" required>
+                        <p style="font-size:10px; color:#71717a; margin-top:6px;">Format JPG/PNG/WEBP, maksimal 5 MB.</p>
+                        <button type="submit" class="pm-btn">Kirim Bukti Pembayaran</button>
+                    </form>
+                    {{ uploaded_info }}
+                    <p style="font-size:10px; color:#71717a; margin-top:10px;">Catatan: mengirim bukti belum berarti pembayaran terverifikasi. Admin akan memverifikasi manual.</p>
+                </div>
+            </div>
+            {{ footer_html }}
+        </div>
+    </body>
+    </html>
+    """,
+        base_head=Markup(BASE_HEAD),
+        err=request.query.get('err', '')[:200],
+        oc=oc, buyer=buyer or "-", tname_=tname_ or "-",
+        status_label=STATUS_LABELS.get(status, status),
+        total_label=orders_svc.format_rupiah(server_total),
+        puc=puc, deadline=deadline,
+        cards_html=Markup(cards_html),
+        status_note=Markup(status_note),
+        uploaded_info=Markup(uploaded_info),
+        footer_html=Markup(FOOTER_HTML),
+    )
+    return web.Response(text=html_content, content_type='text/html')
+
+
+def security_safe_upload_url(rel_path: str) -> str:
+    """Admin media files live under UPLOAD_DIR which IS served at
+    /static_uploads/. Only expose a URL when the file exists inside the root
+    (traversal-blocked via security.safe_upload_path)."""
+    import security
+    abs_path = security.safe_upload_path(rel_path or "")
+    if not abs_path or not os.path.isfile(abs_path):
+        return ""
+    return "/static_uploads/" + os.path.basename(abs_path)
+
+
+async def handle_payment_proof_upload(request):
+    """POST /payment/proof — secure payment-proof upload (Phase 3.2).
+
+    * ownership enforced server-side (cookie token vs invitation _meta.token),
+    * amount NEVER taken from the form,
+    * file validated by magic bytes + extension agreement + 5 MB cap,
+    * stored under UPLOAD_DIR/payment-proof/<order-id>/payment_<random>.<ext>
+      (never a public static directory, never the original filename),
+    * payment.status -> 'submitted' (+submitted_at); order moves through the
+      EXISTING state machine pending_payment -> payment_reported in ONE
+      transaction with rollback. The order is NEVER marked paid here and the
+      invitation is NEVER published.
+    """
+    order_code = ""
+    field_name = None
+    chunks = []
+    size = 0
+    try:
+        reader = await request.multipart()
+        field = await reader.next()
+        while field is not None:
+            if field.name == "order":
+                order_code = str(await field.read(decode=True) or "")[:32]
+            elif field.name == "file" and field.filename:
+                field_name = field.filename
+                while True:
+                    chunk = await field.read_chunk(8192, raise_exception=False)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > payments_svc.MAX_PROOF_SIZE + 1024 * 1024:
+                        break           # hard streaming guard; exact cap below
+                    chunks.append(chunk)
+            field = await reader.next()
+    except Exception:
+        return web.json_response({"ok": False, "error": "Upload tidak valid."},
+                                 status=400)
+
+    if not order_code or not str(order_code).strip():
+        return web.json_response({"ok": False, "error": "Pesanan tidak valid."},
+                                 status=400)
+    data = b"".join(chunks)
+    if not data:
+        return web.json_response({"ok": False, "error": "File bukti pembayaran wajib diisi."},
+                                 status=422)
+
+    token = _draft_identity(request)
+    conn = get_conn()
+    try:
+        cursor = conn.cursor()
+        orders_svc.apply_lazy_expiry(conn)
+        row = _owned_order_row(cursor, token, order_code.strip())
+        if row is None:
+            exists = cursor.execute(
+                "SELECT 1 FROM orders WHERE code = ?", (str(order_code).strip(),)).fetchone()
+            return web.json_response(
+                {"ok": False, "error": "Pesanan tidak ditemukan atau bukan milik Anda."},
+                status=404 if not exists else 403)
+        oid, oc, status = row[0], row[1], row[2]
+
+        if status != orders_svc.PENDING_PAYMENT:
+            return web.json_response(
+                {"ok": False,
+                 "error": ("Bukti sudah dikirim dan sedang menunggu verifikasi."
+                           if status == orders_svc.PAYMENT_REPORTED
+                           else f"Pembayaran tidak tersedia untuk status '{status}'.")},
+                status=409)
+
+        # One transaction: payment row + order transition together.
+        try:
+            if payment is not None and payment["status"] != "pending":
+                # Already submitted (order/payment states out of sync guard):
+                # deterministic duplicate — do NOT overwrite the first proof.
+                raise web.HTTPFound(f"/payment?order={oc}&err=" + quote(
+                    'Bukti sudah dikirim. Tidak perlu kirim ulang.'))
+            rel_path, ext, mime, real_size = payments_svc.store_proof(
+                oid, data, field_name or "")
+        except ValueError as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=422)
+
+        try:
+            if payment is None:
+                # No active attempt yet — create one with the checkout method
+                # (amount always re-derived from the authoritative order).
+                payment, _created = payments_svc.ensure_payment(
+                    conn, oid,
+                    payments_svc.normalize_method(method_db) or "bank_transfer")
+            rc = payments_svc.mark_submitted(
+                conn, payment["id"], rel_path=rel_path,
+                original_name=field_name or "", mime=mime, size=real_size)
+            if rc != 1:
+                conn.rollback()
+                raise web.HTTPFound(f"/payment?order={oc}&err=" + quote(
+                    'Bukti sudah dikirim. Tidak perlu kirim ulang.'))
+            orders_svc.transition(conn, oid, orders_svc.PAYMENT_REPORTED,
+                                  actor="client",
+                                  actor_note="bukti pembayaran diunggah",
+                                  commit=False)
+            conn.commit()
+        except web.HTTPFound as redirect:
+            conn.rollback()
+            raise
+        except orders_svc.IllegalTransition:
+            conn.rollback()
+            return web.json_response(
+                {"ok": False, "error": "Status pesanan berubah. Silakan muat ulang halaman."},
+                status=409)
+        except Exception:
+            conn.rollback()
+            return web.json_response(
+                {"ok": False, "error": "Gagal menyimpan bukti pembayaran."}, status=500)
+    finally:
+        conn.close()
+
+    try:
+        orders_svc.notify_admin(conn2 := get_conn(), "payment_reported", {
+            "order_code": oc, "order_id": oid, "payment_id": payment["id"],
+            "amount": amount, "method": payment["method"]})
+    except Exception:
+        pass
+    else:
+        finally_close = getattr(conn2, "close", None)
+        if callable(finally_close):
+            conn2.close()
+
+    return web.HTTPSeeOther(f"/payment?order={oc}")
+
+
+async def handle_payment_method_select(request):
+    """POST /payment/method — choose QRIS / bank transfer (idempotent).
+
+    Creates OR reuses the single active payment attempt for the order;
+    repeated selections never pile up duplicate rows. Amount comes only
+    from the authoritative order total.
+    """
+    try:
+        post = await request.post()
+    except Exception:
+        return web.json_response({"ok": False, "error": "Form tidak valid."}, status=400)
+    order_code = str(post.get("order") or "")[:32]
+    raw_method = str(post.get("method") or "")
+    method = payments_svc.normalize_method(raw_method)
+    if not order_code:
+        return web.json_response({"ok": False, "error": "Pesanan tidak valid."}, status=400)
+    if method not in ("qris", "bank_transfer"):
+        return web.json_response({"ok": False, "error": "Metode pembayaran tidak dikenal."},
+                                 status=422)
+
+    token = _draft_identity(request)
+    conn = get_conn()
+    try:
+        cursor = conn.cursor()
+        orders_svc.apply_lazy_expiry(conn)
+        row = _owned_order_row(cursor, token, order_code)
+        if row is None:
+            exists = cursor.execute(
+                "SELECT 1 FROM orders WHERE code = ?", (order_code,)).fetchone()
+            return web.json_response(
+                {"ok": False, "error": "Pesanan tidak ditemukan atau bukan milik Anda."},
+                status=404 if not exists else 403)
+        oid, oc, status = row[0], row[1], row[2]
+        if status not in (orders_svc.PENDING_PAYMENT, orders_svc.PAYMENT_REPORTED):
+            return web.json_response(
+                {"ok": False, "error": f"Pembayaran tidak tersedia untuk status '{status}'."},
+                status=409)
+        try:
+            payment, created = payments_svc.ensure_payment(conn, oid, method)
+        except ValueError:
+            return web.json_response({"ok": False, "error": "Metode pembayaran tidak dikenal."},
+                                     status=422)
+    finally:
+        conn.close()
+
+    resp = web.json_response({
+        "ok": True, "payment_id": payment["id"], "created": created,
+        "method": payment["method"], "amount": payment["amount"],
+        "status": payment["status"],
+    })
+    resp.set_cookie("suka_draft_token", token, httponly=True, samesite="Lax",
+                    max_age=30 * 24 * 3600)
+    return resp
 
 
 async def handle_guestbook(request):
@@ -1569,5 +1941,8 @@ def setup(app):
     app.router.add_get('/checkout', handle_checkout)
     app.router.add_post('/checkout/confirm', handle_checkout_confirm)
     app.router.add_get('/checkout/status', handle_checkout_status)
+    app.router.add_get('/payment', handle_payment_page)
+    app.router.add_post('/payment/method', handle_payment_method_select)
+    app.router.add_post('/payment/proof', handle_payment_proof_upload)
     app.router.add_get('/guestbook', handle_guestbook)
     app.router.add_post('/guestbook', handle_guestbook)
