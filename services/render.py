@@ -24,15 +24,46 @@ import json
 import os
 
 import jinja2
+import jinja2.sandbox
 from markupsafe import Markup
 
 from services import tiers as tiers_svc
 
 MODES = ("demo", "preview", "live")
 
-_env = jinja2.Environment(
+
+class _FlatDict(dict):
+    """Mapping that ALSO exposes dotted keys as attribute access.
+
+    The schema-driven editor stores shared group fields under prefixed flat
+    keys (e.g. ``groom_full_name``) but drafts/preview data may use the
+    nested form (``{"groom": {"full_name": ...}}``). Templates reference
+    either shape; Jinja attribute syntax resolves BOTH through __getitem__,
+    so we normalise here instead of forcing every caller to pick one style.
+    """
+
+    def __getattr__(self, key):
+        try:
+            value = self[key]
+        except KeyError:
+            if "." in key:
+                gkey, _, fkey = key.partition(".")
+                grp = self.get(gkey)
+                if isinstance(grp, dict):
+                    return _FlatDict(grp).__getattr__(fkey) \
+                        if fkey in grp else _env.undefined(name=fkey)
+            return _env.undefined(name=key)
+        return _FlatDict(value) if isinstance(value, dict) else value
+
+# Sandboxed: template.html files are trusted repo assets, but invitation
+# data (editor user input) is rendered as Jinja *variables* only; the
+# sandbox hardens against any injected template source reaching from_string.
+# ChainableUndefined: templates use `{{ d.missing or fallback }}` patterns;
+# a missing editor field must degrade to the inline fallback instead of
+# raising (validation happens server-side before rendering).
+_env = jinja2.sandbox.SandboxedEnvironment(
     autoescape=True,
-    undefined=jinja2.StrictUndefined,
+    undefined=jinja2.ChainableUndefined,
     trim_blocks=False,
     lstrip_blocks=False,
     keep_trailing_newline=True,
@@ -199,7 +230,7 @@ def render_invitation(template_dir, data=None, theme=None, tier_code="silver",
         source = f.read()
 
     html = _env.from_string(source).render(
-        d=data,
+        d=_FlatDict(data),
         theme=theme_vars(theme),
         mode=mode,
         slug=api_slug,

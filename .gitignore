@@ -1,1 +1,2 @@
-(empty — output nothing)
+__pycache__/
+*.pyc
