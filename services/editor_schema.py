@@ -100,15 +100,18 @@ def _prefixed_group_fields(schema):
     still prefill the matching control.
     """
     counts = {}
-    owner = {}
+    groups_of = {}
     for group in schema.get("groups", []) or []:
         gkey = group.get("key") or ""
         for f in group.get("fields", []) or []:
             k = f.get("key") if isinstance(f, dict) else None
             if k:
                 counts[k] = counts.get(k, 0) + 1
-                owner[k] = gkey
-    return {k: f"{g}.{k}" for k, g in owner.items() if counts[k] > 1}
+                groups_of.setdefault(k, []).append(gkey)
+    # Shared keys are prefixed with their OWNING group (not the last one
+    # seen while scanning), so groom.full_name / bride.full_name both map.
+    return {k: f"{g}.{k}" for k, gs in groups_of.items() if counts[k] > 1
+            for g in [gs[0]]}
 
 
 def build_form_meta(schema, tier_code="silver"):
@@ -182,6 +185,7 @@ def parse_and_validate(payload, schema, tier_code="silver"):
     item_index = {}          # repeater key -> {field: def}
     theme_index = {}
     group_of = {}            # flat field key -> owning group key
+    groups_for = {}          # flat field key -> [owning group keys]
     shared_keys = set()      # keys declared in more than one group
     for group in schema.get("groups", []) or []:
         gkey = group.get("key") or ""
@@ -191,6 +195,7 @@ def parse_and_validate(payload, schema, tier_code="silver"):
                 if k in group_of:
                     shared_keys.add(k)
                 group_of[k] = gkey
+                groups_for.setdefault(k, []).append(gkey)
     for path, fdef in iter_field_defs(schema):
         if path.startswith("theme."):
             theme_index[path.split(".", 1)[1]] = fdef
@@ -203,6 +208,14 @@ def parse_and_validate(payload, schema, tier_code="silver"):
     data = {}
     theme = {}
     covered = set()          # fields supplied via a nested group object
+    prefixes = _prefixed_group_fields(schema)   # flat key -> prefixed name
+
+    def store(fk, gkey, raw):
+        """Validate one scalar and store it under its canonical data key."""
+        fdef = field_index[fk]
+        out_key = f"{gkey}_{fk}" if fk in shared_keys else fk
+        data[out_key] = _validate_scalar(f"{gkey}.{fk}" if gkey else fk,
+                                         raw, fdef, errors)
 
     for key, value in payload.items():
         if key == "theme":
@@ -217,48 +230,62 @@ def parse_and_validate(payload, schema, tier_code="silver"):
             # Nested group object: {"groom": {"full_name": ...}} — only the
             # keys it declares are taken from it; unknown inner keys dropped.
             for fk, raw in value.items():
-                fdef = field_index.get(fk)
-                if fdef is None:
+                if fk not in field_index:
                     continue
                 covered.add(fk)
-                out_key = f"{key}.{fk}" if fk in shared_keys else fk
-                data[out_key] = _validate_scalar(f"{key}.{fk}", raw, fdef, errors)
+                store(fk, key, raw)
             continue
         if key in field_index:
             data[key] = _validate_scalar(key, value, field_index[key], errors)
+            covered.add(key)
             continue
         # Unknown keys are dropped (never persisted / rendered).
 
     # Prefixed aliases emitted by the generated form (e.g. groom.full_name).
-    # Shared keys (groom/bride full_name) carry the group prefix into the
-    # stored data so both values survive; unique keys keep their plain name.
+    # Shared keys (groom/bride full_name) are stored under an underscored
+    # flat alias (groom_full_name) so both values survive in one flat dict
+    # AND remain resolvable by templates through the owning-group lookup.
     for key, value in payload.items():
         if "." not in key or key == "theme":
             continue
         gkey, _, fk = key.partition(".")
         if fk not in field_index or not isinstance(value, str):
             continue
-        if gkey != group_of.get(fk):
+        if gkey not in groups_for.get(fk, []):
             continue
         covered.add(fk)
-        out_key = f"{gkey}_{fk}" if fk in shared_keys else fk
-        data[out_key] = _validate_scalar(key, value, field_index[fk], errors)
+        store(fk, gkey, value)
+
+    # Canonicalise prefixed names back to their flat storage key for fields
+    # that are NOT shared across groups (preview.json sample shape), so a
+    # draft saved with e.g. {"couple.intro": "..."} still prefill/matches
+    # the plain "intro" key on re-open and rendering.
+    for pk, fk in ((v, k) for k, v in prefixes.items()):
+        if pk in data and fk not in shared_keys:
+            data[fk] = data.pop(pk)
 
     # Required scalars — checked against the RAW submitted value so an empty
     # string is never silently replaced by a template default at save time.
     for key, fdef in field_index.items():
         if not fdef.get("required") or key in covered:
             continue
+        gkeys = groups_for.get(key, [])
         supplied = bool(str(payload.get(key, "") or "").strip())
         if not supplied:
-            gkey = group_of.get(key)
-            grp = payload.get(gkey) if gkey else None
-            if isinstance(grp, dict) and str(grp.get(key, "") or "").strip():
-                supplied = True
-            elif gkey and str(payload.get(f"{gkey}.{key}", "") or "").strip():
-                supplied = True
+            for gkey in gkeys:
+                grp = payload.get(gkey)
+                if isinstance(grp, dict) and str(grp.get(key, "") or "").strip():
+                    supplied = True
+                    break
+                # Prefixed form name (groom.full_name) / stored alias
+                # (groom_full_name) count as supplied too.
+                if str(payload.get(f"{gkey}.{key}", "") or "").strip() or \
+                        str(payload.get(f"{gkey}_{key}", "") or "").strip():
+                    supplied = True
+                    break
         if not supplied:
-            errors.setdefault(key, f"{fdef.get('label', key)} wajib diisi.")
+            err_key = f"{gkeys[0]}.{key}" if key in shared_keys else key
+            errors.setdefault(err_key, f"{fdef.get('label', key)} wajib diisi.")
 
     if errors:
         raise EditorValidationError(errors)
