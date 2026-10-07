@@ -321,13 +321,22 @@ def wire_forms(html: str, slug: str, mode: str) -> str:
     return _re.sub(r'<form[^>]*data-api="([^"]*)"[^>]*>', _rewrite, html)
 
 
+PREVIEW_BADGE_HTML = (
+    '<div style="position:fixed; bottom:10px; right:10px; background:rgba(0,0,0,0.7);'
+    ' color:#60a5fa; font-size:10px; padding:4px 8px; border-radius:4px; z-index:9999;">'
+    'SUKA MOTO PREVIEW MODE</div>'
+)
+
+
 def decorate_mode(html: str, mode: str) -> str:
     """Insert mode-specific badge/scripts right after <body>."""
     inject = ""
     if mode == "demo":
         inject = PROTECT_SCRIPT_HTML + DEMO_BADGE_HTML + DEMO_FORM_SCRIPT_HTML
     elif mode == "preview":
-        inject = DEMO_FORM_SCRIPT_HTML
+        # Editor iframe badge (distinct from the public demo watermark) plus
+        # the in-memory form stub so RSVP/wish forms never hit a backend.
+        inject = PREVIEW_BADGE_HTML + DEMO_FORM_SCRIPT_HTML
     if not inject:
         return html
     body_at = _re.search(r"<body[^>]*>", html, _re.IGNORECASE)

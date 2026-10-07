@@ -267,10 +267,20 @@ def parse_and_validate(payload, schema, tier_code="silver"):
     # Required scalars — checked against the RAW submitted value so an empty
     # string is never silently replaced by a template default at save time.
     for key, fdef in field_index.items():
-        if not fdef.get("required") or key in covered:
+        if not fdef.get("required"):
+            continue
+        # A field counts as covered only when a NON-EMPTY raw value was
+        # supplied through one of its accepted names — an empty string must
+        # never silence the required check.
+        def _nonempty(v):
+            return bool(str(v or "").strip())
+        covered_ok = (key in covered) and any(
+            _nonempty(payload.get(n)) for n in
+            [key] + [f"{g}.{key}" for g in groups_for.get(key, [])])
+        if covered_ok:
             continue
         gkeys = groups_for.get(key, [])
-        supplied = bool(str(payload.get(key, "") or "").strip())
+        supplied = _nonempty(payload.get(key))
         if not supplied:
             for gkey in gkeys:
                 grp = payload.get(gkey)
@@ -284,6 +294,11 @@ def parse_and_validate(payload, schema, tier_code="silver"):
                     supplied = True
                     break
         if not supplied:
+            # Shared keys (e.g. groom/bride full_name) are validated per
+            # group above; the flat alias itself must not produce a second,
+            # confusing error entry.
+            if key in shared_keys:
+                continue
             err_key = f"{gkeys[0]}.{key}" if key in shared_keys else key
             errors.setdefault(err_key, f"{fdef.get('label', key)} wajib diisi.")
 

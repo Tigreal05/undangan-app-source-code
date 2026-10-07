@@ -7,9 +7,10 @@ the checkout form now submits via POST.
 import json
 import os
 import re
+from datetime import datetime, timedelta
 
 from aiohttp import web
-from markupsafe import Markup
+from markupsafe import Markup, escape as _html_esc
 
 import config
 from db import get_conn
@@ -19,6 +20,19 @@ from services import orders as orders_svc
 from services import render as render_svc
 from services import template_resolver as resolver_svc
 from services.tiers import duration_label as _tier_duration, get_tier
+
+#: Human-readable order status labels (kept in sync with the admin inbox).
+STATUS_LABELS = {
+    orders_svc.DRAFT: "Dibuat",
+    orders_svc.NEW: "Baru",
+    orders_svc.PENDING_PAYMENT: "Menunggu Pembayaran",
+    orders_svc.PAYMENT_REPORTED: "Bukti Diterima",
+    orders_svc.PAID: "Dikonfirmasi",
+    orders_svc.IN_PROTECTION: "Perlindungan",
+    orders_svc.PUBLISHED: "Undangan Aktif",
+    orders_svc.EXPIRED: "Kedaluwarsa",
+    orders_svc.CANCELLED: "Dibatalkan",
+}
 
 # Legacy free-text values that used to live in templates.duration; the period
 # now comes exclusively from the tier's active_days (services/tiers.py).
@@ -1044,7 +1058,11 @@ async def handle_editor_save(request):
                 conn.commit()
             except Exception:
                 conn.rollback()
-                raise
+                # Rollback completed safely — return a structured JSON error
+                # (no orphan order, no partial invitation) instead of letting
+                # the exception escape into aiohttp's plaintext 500 handler.
+                return web.json_response(
+                    {"ok": False, "error": "Gagal menyimpan draft."}, status=500)
     finally:
         conn.close()
 
@@ -1056,6 +1074,45 @@ async def handle_editor_save(request):
 
 async def handle_checkout(request):
     tmpl_id = request.query.get('id')
+    draft_id = request.query.get('draft')
+    if draft_id is not None and not str(draft_id).isdigit():
+        draft_id = None
+
+    # --- Draft ownership check (Phase 3.1) ---------------------------------
+    # A draft can only be checked out by the editing context that owns it:
+    # the HttpOnly suka_draft_token cookie must match content_json._meta.token
+    # AND the draft's template must match the requested template id. The
+    # client cannot forge this with a hidden input — validation is purely
+    # server-side. Without a matching draft there is NO fallback to any
+    # other invitation (no IDOR).
+    draft = None
+    if draft_id is not None:
+        token = _draft_identity(request)
+        conn = get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT i.id, i.order_id, i.title, i.couple_names,"
+                " i.event_date, i.event_time, i.venue_name,"
+                " json_extract(i.content_json, '$._meta.template_id'),"
+                " o.status"
+                " FROM invitations i JOIN orders o ON o.id = i.order_id"
+                " WHERE i.id = ? AND i.state = 'draft'"
+                "   AND json_extract(i.content_json, '$._meta.token') = ?",
+                (int(draft_id), token))
+            row = cursor.fetchone()
+            if row is None or str(row[7]) != str(tmpl_id):
+                return web.json_response(
+                    {"ok": False, "error": "Draft tidak ditemukan atau bukan milik Anda."},
+                    status=403)
+            if row[8] != orders_svc.DRAFT:
+                return web.json_response(
+                    {"ok": False, "error": "Pesanan untuk draft ini sudah diproses."},
+                    status=409)
+            draft = row
+        finally:
+            conn.close()
+
     conn = get_conn()
     cursor = conn.cursor()
     cursor.execute('''
@@ -1071,6 +1128,31 @@ async def handle_checkout(request):
 
     tname, tprice, tdisc, tdur, ttier = tmpl
     tdur = resolve_duration(ttier, tdur)
+
+    # Server-side price truth (Phase 3.1): the amount shown here is computed
+    # from DB tier/template prices via services/orders.py — never from the
+    # client. The same values are re-read server-side at confirmation time.
+    uniq_preview = orders_svc.payment_unique_code()
+    total_preview = orders_svc.compute_total(tprice, tdisc, uniq_preview)
+
+    if draft is not None:
+        summary_rows = (
+            "<div class=\"summary-row\"><span>Judul Undangan</span><strong style=\"color:#fff;\">{}</strong></div>"
+            "<div class=\"summary-row\"><span>Pasangan</span><strong style=\"color:#fff;\">{}</strong></div>"
+            "<div class=\"summary-row\"><span>Tanggal</span><strong style=\"color:#fff;\">{}</strong></div>"
+            "<div class=\"summary-row\"><span>Waktu</span><strong style=\"color:#fff;\">{}</strong></div>"
+            "<div class=\"summary-row\"><span>Tempat</span><strong style=\"color:#fff;\">{}</strong></div>"
+        ).format(
+            _html_esc(draft[2] or ''), _html_esc(draft[3] or ''),
+            _html_esc(draft[4] or ''), _html_esc(draft[5] or ''),
+            _html_esc(draft[6] or '-'))
+        hidden_draft = f'<input type="hidden" name="draft_id" value="{int(draft[0])}">'
+        submit_label = "Konfirmasi Pesanan &rarr;"
+    else:
+        summary_rows = ""
+        hidden_draft = ""
+        submit_label = "Simulasi Bayar & Lanjut ke Buku Tamu &rarr;"
+
     html_content = render("""
     <!DOCTYPE html>
     <html lang="id">
@@ -1101,13 +1183,15 @@ async def handle_checkout(request):
                     <div class="summary-row"><span>Template</span><strong style="color:#fff;">{{ tname }}</strong></div>
                     <div class="summary-row"><span>Durasi Aktif</span><strong style="color:#fff;">{{ tdur }}</strong></div>
                     <div class="summary-row"><span>Promo/Diskon</span><strong style="color:#ef4444;">{{ tdisc or 'Tidak ada' }}</strong></div>
-                    <div class="summary-row total"><span>Total Pembayaran</span><span>{{ tprice }}</span></div>
+                    <div class="summary-row total"><span>Total Pembayaran</span><span>{{ total_label }}</span></div>
                 </div>
 
                 <div class="checkout-box" style="margin-top: 15px;">
                     <h3 style="font-size: 14px; color: #fff; margin-bottom: 10px;">Data Pemesan</h3>
-                    <form action="/guestbook" method="POST">
+                    {{ summary_rows }}
+                    <form action="/checkout/confirm" method="POST">
                         <input type="hidden" name="id" value="{{ tmpl_id }}">
+                        {{ hidden_draft }}
                         <label style="font-size:11px; color:#a1a1aa;">Nama Lengkap / Mempelai:</label>
                         <input type="text" name="buyer_name" placeholder="Contoh: Rian & Siska" required>
                         <label style="font-size:11px; color:#a1a1aa; margin-top:8px; display:block;">Nomor WhatsApp:</label>
@@ -1117,7 +1201,7 @@ async def handle_checkout(request):
                             <option value="BCA">Transfer BCA - 1234567890 a.n SUKA MOTO</option>
                             <option value="DANA">QRIS / DANA - 085156918852</option>
                         </select>
-                        <button type="submit" class="pay-btn">Simulasi Bayar & Lanjut ke Buku Tamu &rarr;</button>
+                        <button type="submit" class="pay-btn">{{ submit_label | safe }}</button>
                     </form>
                 </div>
             </div>
@@ -1128,6 +1212,223 @@ async def handle_checkout(request):
     """,
         base_head=Markup(BASE_HEAD),
         tname=tname, tprice=tprice, tdisc=tdisc, tdur=tdur, tmpl_id=tmpl_id,
+        total_label=orders_svc.format_rupiah(total_preview),
+        summary_rows=Markup(summary_rows),
+        hidden_draft=Markup(hidden_draft),
+        submit_label=submit_label,
+        footer_html=Markup(FOOTER_HTML),
+    )
+    return web.Response(text=html_content, content_type='text/html')
+
+
+async def handle_checkout_confirm(request):
+    """POST /checkout/confirm — draft order -> pending_payment (Phase 3.1).
+
+    Server-side truth only: template/tier/price are re-read from the DB, the
+    invitation is located through the authenticated draft identity (cookie +
+    _meta.token), never through client-supplied amounts or statuses. The whole
+    lifecycle move runs in ONE transaction with rollback on any failure.
+    Idempotent: an already-confirmed draft returns its existing order instead
+    of creating a duplicate.
+    """
+    try:
+        data = await request.post()
+    except Exception:
+        return web.json_response({"ok": False, "error": "Form tidak valid."}, status=400)
+
+    tmpl_id = data.get('id')
+    buyer_name = (data.get('buyer_name') or '').strip()[:120]
+    whatsapp = (data.get('whatsapp') or '').strip()[:32]
+    payment_method = (data.get('bank') or '').strip()[:20]
+    if not tmpl_id or not str(tmpl_id).isdigit():
+        return web.json_response({"ok": False, "error": "Template tidak valid."}, status=400)
+    tmpl_id = int(tmpl_id)
+    if not buyer_name:
+        return web.json_response({"ok": False, "error": "Nama pemesan wajib diisi."}, status=422)
+    if payment_method not in ("BCA", "DANA"):
+        return web.json_response({"ok": False, "error": "Metode pembayaran tidak dikenal."}, status=422)
+
+    token = _draft_identity(request)
+    conn = get_conn()
+    try:
+        cursor = conn.cursor()
+        orders_svc.apply_lazy_expiry(conn)
+
+        # Locate the draft invitation owned by THIS editing context.
+        cursor.execute(
+            "SELECT i.id, i.order_id FROM invitations i"
+            " WHERE i.state = 'draft' AND i.custom = 0"
+            "   AND json_extract(i.content_json, '$._meta.token') = ?"
+            "   AND json_extract(i.content_json, '$._meta.template_id') = ?"
+            " ORDER BY i.id DESC LIMIT 1",
+            (token, str(tmpl_id)))
+        row = cursor.fetchone()
+        if row is None:
+            return web.json_response(
+                {"ok": False, "error": "Tidak ada draft untuk dikonfirmasi. Simpan draft terlebih dahulu."},
+                status=403)
+        invitation_id, order_id = row
+
+        cursor.execute(
+            "SELECT code, status, tier_id, template_id FROM orders WHERE id = ?",
+            (order_id,))
+        order = cursor.fetchone()
+        if order is None:
+            return web.json_response({"ok": False, "error": "Order tidak ditemukan."}, status=404)
+        order_code, status, tier_id, order_template_id = order
+
+        # --- Idempotency: already confirmed? Return the same order. --------
+        if status == orders_svc.PENDING_PAYMENT:
+            return web.Response(
+                text=f'<meta http-equiv="refresh" content="0; url=/checkout/status?order={order_code}">',
+                content_type='text/html')
+        if status != orders_svc.DRAFT:
+            return web.json_response(
+                {"ok": False, "error": f"Pesanan tidak dapat dikonfirmasi dari status '{status}'."},
+                status=409)
+
+        # --- Price truth: ONLY from the DB (template + tier), never form. --
+        cursor.execute(
+            "SELECT t.price, t.discount FROM templates t"
+            " LEFT JOIN tiers ti ON t.tier_id = ti.id WHERE t.id = ?",
+            (order_template_id if order_template_id is not None else tmpl_id,))
+        tmpl_row = cursor.fetchone()
+        if tmpl_row is None:
+            return web.json_response({"ok": False, "error": "Template tidak ditemukan."}, status=404)
+        price_text, discount_text = tmpl_row
+
+        puc = orders_svc.payment_unique_code(conn)
+        if not puc:
+            return web.json_response(
+                {"ok": False, "error": "Kode pembayaran sedang penuh. Silakan coba lagi."},
+                status=503)
+        total = orders_svc.compute_total(price_text, discount_text, puc)
+
+        now = orders_svc._now_str()
+        deadline = (datetime.now() + timedelta(
+            hours=orders_svc.PAYMENT_DEADLINE_HOURS)).strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            cursor.execute(
+                "UPDATE orders SET status = ?, buyer_name = ?, whatsapp = ?,"
+                " payment_method = ?, amount = ?, payment_unique_code = ?,"
+                " payment_deadline = ?, updated_at = ? WHERE id = ? AND status = ?",
+                (orders_svc.PENDING_PAYMENT, buyer_name, whatsapp, payment_method,
+                 orders_svc.format_rupiah(total), puc, deadline, now,
+                 order_id, orders_svc.DRAFT))
+            if cursor.rowcount != 1:
+                # Someone else moved this order concurrently — abort cleanly.
+                raise orders_svc.IllegalTransition("order status changed concurrently")
+            # Keep the linked invitation consistent with the draft state.
+            cursor.execute(
+                "UPDATE invitations SET updated_at = ? WHERE id = ?", (now, invitation_id))
+            orders_svc.log_order_event(
+                conn, order_id, actor="client", action="transition:pending_payment",
+                from_status=orders_svc.DRAFT, to_status=orders_svc.PENDING_PAYMENT,
+                note=f"checkout invitation={invitation_id}")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            return web.json_response(
+                {"ok": False, "error": "Gagal membuat pesanan. Silakan coba lagi."},
+                status=500)
+    finally:
+        conn.close()
+
+    return web.HTTPSeeOther(f"/checkout/status?order={order_code}")
+
+
+async def handle_checkout_status(request):
+    """GET /checkout/status?order=<code> — client-facing order status page.
+
+    Ownership: the page only reveals details when the order's linked draft
+    invitation belongs to THIS editing context (cookie token == content_json
+    ._meta.token). Unknown/non-owned orders get a generic 403/404 — no admin
+    data is exposed.
+    """
+    code = request.query.get('order', '')
+    if not code or len(str(code)) > 32:
+        return web.Response(text="Pesanan tidak ditemukan", status=404)
+
+    token = _draft_identity(request)
+    conn = get_conn()
+    try:
+        cursor = conn.cursor()
+        orders_svc.apply_lazy_expiry(conn)
+        cursor.execute(
+            "SELECT o.id, o.code, o.status, o.buyer_name, o.amount,"
+            " o.payment_method, o.payment_unique_code, o.payment_deadline,"
+            " t.name, o.template_id"
+            " FROM orders o"
+            " LEFT JOIN templates t ON t.id = o.template_id"
+            " WHERE o.code = ?", (str(code),))
+        row = cursor.fetchone()
+        if row is None:
+            return web.Response(text="Pesanan tidak ditemukan", status=404)
+        (oid, oc, status, buyer, amount, method, puc, deadline, tname_, tmpl_id) = row
+
+        cursor.execute(
+            "SELECT 1 FROM invitations WHERE order_id = ?"
+            " AND json_extract(content_json, '$._meta.token') = ?",
+            (oid, token))
+        mine = cursor.fetchone() is not None
+    finally:
+        conn.close()
+
+    if not mine:
+        return web.json_response(
+            {"ok": False, "error": "Pesanan bukan milik Anda."}, status=403)
+
+    status_label = STATUS_LABELS.get(status, status)
+    html_content = render("""
+    <!DOCTYPE html>
+    <html lang="id">
+    <head>
+        {{ base_head }}
+        <style>
+            .st-box { background: #18181b; border: 1px solid #27272a; border-radius: 12px; padding: 20px; margin-top: 15px; }
+            .st-row { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 10px; color: #a1a1aa; }
+            .st-badge { display:inline-block; padding: 4px 10px; border-radius: 999px; font-size: 11px; font-weight: bold; background: #fbbf24; color: #000; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="content-wrap">
+                <div class="navbar">
+                    <a href="/" class="brand-group">
+                        <span class="brand-main">SUKA MOTO</span>
+                        <span class="brand-sub">Invitation</span>
+                    </a>
+                </div>
+                <div class="section-title">Status Pesanan</div>
+                <div class="st-box">
+                    <p style="font-size:13px; color:#34d399; font-weight:bold; margin-bottom:12px;">Pesanan berhasil dibuat.</p>
+                    <div class="st-row"><span>Kode Pesanan</span><strong style="color:#fff;">{{ oc }}</strong></div>
+                    <div class="st-row"><span>Status</span><span class="st-badge">{{ status_label }}</span></div>
+                    <div class="st-row"><span>Pemesan</span><strong style="color:#fff;">{{ buyer }}</strong></div>
+                    <div class="st-row"><span>Template</span><strong style="color:#fff;">{{ tname_ }}</strong></div>
+                    <div class="st-row"><span>Total Pembayaran</span><strong style="color:#34d399;">{{ amount }}</strong></div>
+                    <div class="st-row"><span>Metode</span><strong style="color:#fff;">{{ method }}</strong></div>
+                    {% if puc %}<div class="st-row"><span>Kode Unik Pembayaran</span><strong style="color:#fbbf24;">{{ puc }}</strong></div>{% endif %}
+                    {% if deadline %}<div class="st-row"><span>Batas Bayar</span><strong style="color:#fff;">{{ deadline }}</strong></div>{% endif %}
+                </div>
+                <div class="st-box">
+                    <p style="font-size:12px; color:#a1a1aa;">
+                        Pembayaran Anda <strong style="color:#fbbf24;">belum dikonfirmasi</strong>.
+                        Transfer sesuai total + kode unik ke rekening yang tertera pada halaman checkout.
+                        Konfirmasi pembayaran akan tersedia pada tahap berikutnya.
+                    </p>
+                    <a href="/editor?id={{ tmpl_id }}" style="display:inline-block; margin-top:10px; background:#fbbf24; color:#000; padding:8px 14px; border-radius:8px; font-size:12px; font-weight:bold; text-decoration:none;">Kembali ke Editor</a>
+                </div>
+            </div>
+            {{ footer_html }}
+        </div>
+    </body>
+    </html>
+    """,
+        base_head=Markup(BASE_HEAD),
+        oc=oc, status_label=status_label, buyer=buyer or "-",
+        tname_=tname_ or "-", amount=amount or "-", method=method or "-",
+        puc=puc, deadline=deadline, tmpl_id=tmpl_id if tmpl_id is not None else "",
         footer_html=Markup(FOOTER_HTML),
     )
     return web.Response(text=html_content, content_type='text/html')
@@ -1266,5 +1567,7 @@ def setup(app):
     app.router.add_post('/editor/preview', handle_editor_preview)
     app.router.add_post('/editor/save', handle_editor_save)
     app.router.add_get('/checkout', handle_checkout)
+    app.router.add_post('/checkout/confirm', handle_checkout_confirm)
+    app.router.add_get('/checkout/status', handle_checkout_status)
     app.router.add_get('/guestbook', handle_guestbook)
     app.router.add_post('/guestbook', handle_guestbook)
