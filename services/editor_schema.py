@@ -221,7 +221,8 @@ def parse_and_validate(payload, schema, tier_code="silver"):
                 if fdef is None:
                     continue
                 covered.add(fk)
-                data[fk] = _validate_scalar(f"{key}.{fk}", raw, fdef, errors)
+                out_key = f"{key}.{fk}" if fk in shared_keys else fk
+                data[out_key] = _validate_scalar(f"{key}.{fk}", raw, fdef, errors)
             continue
         if key in field_index:
             data[key] = _validate_scalar(key, value, field_index[key], errors)
@@ -231,8 +232,6 @@ def parse_and_validate(payload, schema, tier_code="silver"):
     # Prefixed aliases emitted by the generated form (e.g. groom.full_name).
     # Shared keys (groom/bride full_name) carry the group prefix into the
     # stored data so both values survive; unique keys keep their plain name.
-    for path, fdef in list(field_index.items()):
-        pass
     for key, value in payload.items():
         if "." not in key or key == "theme":
             continue
