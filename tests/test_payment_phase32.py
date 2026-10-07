@@ -230,7 +230,7 @@ async def test_valid_proofs_accepted_and_mark_submitted(aiohttp_client):
     """JPG / PNG / WEBP with correct magic bytes are accepted; each valid
     submission marks the payment 'submitted' and records submitted_at."""
     from aiohttp import FormData
-    for blob, fname in (("jpg", JPG_BYTES), ("png", PNG_BYTES), ("webp", WEBP_BYTES)):
+    for fname, blob in (("jpg", JPG_BYTES), ("png", PNG_BYTES), ("webp", WEBP_BYTES)):
         client = await aiohttp_client(create_app())
         _, code = await _confirmed_order(client)   # fresh order per format
 
@@ -558,3 +558,46 @@ def test_normalize_method():
     assert payments_svc.normalize_method("dana") == "qris"
     assert payments_svc.normalize_method("BCA") == "bank_transfer"
     assert payments_svc.normalize_method("paypal") == ""
+
+
+@pytest.mark.asyncio
+async def test_multipart_field_order_independent(aiohttp_client):
+    """Regression: the parser must read every multipart part exactly once and
+    classify it by filename/name — NOT by position. Both field orderings
+    (file -> text and text -> file) must produce a valid submission."""
+    from aiohttp import FormData
+
+    # Case A: file FIRST, then the order code.
+    client = await aiohttp_client(create_app())
+    _, code = await _confirmed_order(client)
+    form = FormData()
+    form.add_field("file", PNG_BYTES, filename="bukti-dulu.png")
+    form.add_field("order", code)
+    r = await client.post("/payment/proof", data=form, allow_redirects=False)
+    assert r.status == 303
+
+    conn = _conn()
+    pay = conn.execute(
+        "SELECT p.status FROM payments p JOIN orders o ON o.id = p.order_id"
+        " WHERE o.code = ?", (code,)).fetchone()
+    ord_status = conn.execute(
+        "SELECT status FROM orders WHERE code = ?", (code,)).fetchone()[0]
+    conn.close()
+    assert pay[0] == "submitted"
+    assert ord_status == orders_svc.PAYMENT_REPORTED
+
+    # Case B: order code FIRST, then file (classic ordering).
+    client2 = await aiohttp_client(create_app())
+    _, code2 = await _confirmed_order(client2)
+    form2 = FormData()
+    form2.add_field("order", code2)
+    form2.add_field("file", JPG_BYTES, filename="belakang.jpg")
+    r2 = await client2.post("/payment/proof", data=form2, allow_redirects=False)
+    assert r2.status == 303
+
+    conn = _conn()
+    pay2 = conn.execute(
+        "SELECT p.status FROM payments p JOIN orders o ON o.id = p.order_id"
+        " WHERE o.code = ?", (code2,)).fetchone()
+    conn.close()
+    assert pay2[0] == "submitted"

@@ -1653,16 +1653,15 @@ async def handle_payment_proof_upload(request):
         reader = await request.multipart()
         field = await reader.next()
         while field is not None:
-            if field.name == "order":
-                raw = await field.read(decode=True)
-                if isinstance(raw, (bytes, bytearray)):
-                    raw = bytes(raw).decode("utf-8", "replace")
-                order_code = str(raw or "").strip()[:32]
-            elif field.name == "file" and field.filename:
+            if field.filename:
+                # Binary file part — identified by filename, NOT by a fixed
+                # field name and NOT by position, so any multipart field
+                # ordering (token -> file or file -> token) works.
+                # Bounded streaming read: stop once we exceed
+                # MAX_PROOF_SIZE + slack so an oversized upload can never
+                # exhaust memory. The exact 5 MB cap is enforced (again)
+                # inside store_proof().
                 field_name = field.filename
-                # Bounded streaming read: stop after MAX_PROOF_SIZE + 1 byte
-                # so an oversized upload can never exhaust memory. The exact
-                # 5 MB cap is enforced (again) inside store_proof().
                 chunks = []
                 size = 0
                 while True:
@@ -1674,6 +1673,16 @@ async def handle_payment_proof_upload(request):
                     if size > payments_svc.MAX_PROOF_SIZE:
                         break           # oversize — rejected by the check below
                 data = b"".join(chunks)
+            else:
+                # Text part: classify by field.name; every part is read
+                # exactly once before classification.
+                raw = await field.read(decode=False)
+                if isinstance(raw, (bytes, bytearray)):
+                    raw = bytes(raw).decode("utf-8", "replace")
+                value = str(raw or "")
+                if field.name == "order":
+                    order_code = value.strip()[:32]
+                # unknown text fields are consumed but ignored
             field = await reader.next()
     except Exception:
         return web.json_response({"ok": False, "error": "Upload tidak valid."},
