@@ -46,13 +46,25 @@ class _FlatDict(dict):
         try:
             value = self[key]
         except KeyError:
-            if "." in key:
+            if "_" in key:
+                # Prefixed flat alias (e.g. groom_full_name for a shared
+                # field stored as "groom.full_name"): resolve via the
+                # owning group so templates can reference either shape.
+                gkey, _, fkey = key.partition("_")
+                grp = self.get(gkey)
+                if isinstance(grp, dict) and fkey in grp:
+                    value = grp[fkey]
+                else:
+                    return _env.undefined(name=key)
+            elif "." in key:
                 gkey, _, fkey = key.partition(".")
                 grp = self.get(gkey)
                 if isinstance(grp, dict):
                     return _FlatDict(grp).__getattr__(fkey) \
                         if fkey in grp else _env.undefined(name=fkey)
-            return _env.undefined(name=key)
+                return _env.undefined(name=key)
+            else:
+                return _env.undefined(name=key)
         return _FlatDict(value) if isinstance(value, dict) else value
 
 # Sandboxed: template.html files are trusted repo assets, but invitation
