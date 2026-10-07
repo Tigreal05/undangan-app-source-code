@@ -37,7 +37,7 @@ def test_migration_runs_twice_without_error(tmp_path):
         assert v1 == v2
         assert rows_before == rows_after == 3
         assert conn.execute("SELECT COUNT(*) FROM packages").fetchone()[0] == 3
-        assert conn.execute("SELECT COUNT(*) FROM templates").fetchone()[0] == 4
+        assert conn.execute("SELECT COUNT(*) FROM templates").fetchone()[0] == 5
     finally:
         conn.close()
 
