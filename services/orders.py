@@ -258,8 +258,12 @@ def mark_notification_read(conn, notification_id) -> int:
 
 def log_order_event(conn, order_id, *, actor: str, action: str,
                     from_status: str = "", to_status: str = "",
-                    note: str = ""):
-    """Append one row to order_events. Never raises on logging problems."""
+                    note: str = "", commit: bool = True):
+    """Append one row to order_events. Never raises on logging problems.
+
+    ``commit=False`` keeps the INSERT in the caller's open transaction
+    (Phase 3.2 proof submission rolls payment + order + event together).
+    """
     try:
         cursor = conn.cursor()
         cursor.execute(
@@ -267,7 +271,8 @@ def log_order_event(conn, order_id, *, actor: str, action: str,
             " (order_id, actor, action, from_status, to_status, note)"
             " VALUES (?, ?, ?, ?, ?, ?)",
             (order_id, actor, action, from_status, to_status, note))
-        conn.commit()
+        if commit:
+            conn.commit()
     except Exception:
         # Logging must never break a business transition; the DB may be old.
         pass
@@ -359,13 +364,16 @@ def unique_code(length: int = 8, conn=None, table: str = "invitations",
 
 
 def transition(conn, order_id, target: str, *, actor_note: str = "",
-               actor: str = "system") -> str:
+               actor: str = "system", commit: bool = True) -> str:
     """Move an order to ``target`` enforcing the state machine.
 
     Returns the new status. Raises IllegalTransition for unknown states or
     disallowed moves. Sets the matching timestamp column and refreshes
     ``expires_at`` from the tier when the invitation gets published.
     Every successful move is logged in ``order_events`` (who/when/from->to).
+
+    ``commit=False`` keeps the UPDATE inside the caller's transaction so a
+    multi-table move (e.g. Phase 3.2 payment + order) can roll back together.
     """
     current_status = ALLOWED_TRANSITIONS.keys()
     if target not in current_status:
@@ -407,11 +415,13 @@ def transition(conn, order_id, target: str, *, actor_note: str = "",
 
     params.append(order_id)
     cursor.execute(f"UPDATE orders SET {', '.join(sets)} WHERE id = ?", params)
-    conn.commit()
+    if commit:
+        conn.commit()
 
     # Phase 5: every status change is logged (who, when, from -> to).
     log_order_event(conn, order_id, actor=actor, action=f"transition:{target}",
-                    from_status=current, to_status=target, note=actor_note)
+                    from_status=current, to_status=target, note=actor_note,
+                    commit=commit)
     return target
 
 
