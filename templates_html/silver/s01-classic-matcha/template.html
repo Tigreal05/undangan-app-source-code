@@ -27,12 +27,20 @@
     {% endif %}
     <h1>The Wedding of</h1>
     <h2>{{ d.title | default('Rian & Siska') }}</h2>
+    {% if d.groom_full_name or d.bride_full_name %}
+    <p>{{ d.groom_full_name or '' }}{% if d.groom_full_name and d.bride_full_name %} &amp; {% endif %}{{ d.bride_full_name or '' }}</p>
+    {% endif %}
     <p>{{ d.intro or '' }}</p>
     <div data-feature="countdown">
-        <p>{{ d.date_label | default('12 Desember 2026') }}</p>
+        <p>{{ d.date_label or d.day_label_full or d.date_iso | default('12 Desember 2026') }}</p>
+        {% if d.time_range %}<p class="accent">{{ d.time_range }}</p>{% endif %}
     </div>
     <div data-feature="map">
+        {% for ev in d.events or [] %}
+        <p><strong>{{ ev.label }}</strong> — {{ ev.venue_name or d.venue_name or '' }}</p>
+        {% else %}
         <p>{{ d.venue_name | default('Gedung Kencana Cirebon') }}</p>
+        {% endfor %}
     </div>
     <div data-feature="qr">
         <p>QR Undangan</p>

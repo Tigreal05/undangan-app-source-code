@@ -4,7 +4,9 @@ All HTML is rendered through Jinja2 with autoescape ON so DB/query values can
 never inject markup. URLs and behavior match the original app.py except that
 the checkout form now submits via POST.
 """
+import json
 import os
+import re
 
 from aiohttp import web
 from markupsafe import Markup
@@ -12,6 +14,8 @@ from markupsafe import Markup
 import config
 from db import get_conn
 from routes.common import BASE_HEAD, FOOTER_HTML, NAV_SCRIPT, render
+from services import editor_schema as editor_svc
+from services import orders as orders_svc
 from services import render as render_svc
 from services import template_resolver as resolver_svc
 from services.tiers import duration_label as _tier_duration, get_tier
@@ -451,7 +455,30 @@ async def handle_demo(request):
 
 
 async def handle_editor(request):
+    """GET /editor?id=<template_id>[&draft=<invitation_id>]
+
+    Phase 2 migration (schema-driven editor):
+
+    * source="new"    → data editor generated from schema.json. Initial data
+                        comes from an existing draft (content_json) when one
+                        is available for this editing context, otherwise from
+                        preview.json (read-only sample — never written back).
+                        Live preview goes through POST /editor/preview and
+                        saving through POST /editor/save.
+    * source="legacy" → unchanged legacy contenteditable behaviour over
+                        templates.html_code (gradual migration; the legacy
+                        path is removed in a later phase).
+    """
     tmpl_id = request.query.get('id')
+    try:
+        resolved = resolver_svc.resolve_template_by_id(tmpl_id)
+    except resolver_svc.TemplateResolutionError:
+        return web.Response(text="Template tidak ditemukan", status=404)
+
+    if resolved["source"] == resolver_svc.SOURCE_NEW:
+        return await _editor_new(request, resolved)
+
+    # ---- Legacy editor (html_code + contenteditable) — kept as-is ----------
     conn = get_conn()
     cursor = conn.cursor()
     cursor.execute('SELECT name, price, html_code FROM templates WHERE id = ?', (tmpl_id,))
@@ -474,6 +501,557 @@ async def handle_editor(request):
     """, tname=tname, tprice=tprice, tmpl_id=tmpl_id)
     modified_html = html_code.replace("<body>", f"<body>{editor_banner}")
     return web.Response(text=modified_html, content_type='text/html')
+
+
+# ---------------------------------------------------------------------------
+# Schema-driven editor (Phase 2) — new templates only
+# ---------------------------------------------------------------------------
+
+def _draft_identity(request):
+    """Opaque token that ties repeated saves to the same browser session.
+
+    LIMITATION (documented honestly): the app has no client authentication
+    yet, so drafts are identified by (template, this random cookie, the
+    explicit ?draft= id echoed by the editor page). Anyone who obtains the
+    cookie/token could reopen their own draft; there is no multi-user
+    isolation until a real client account system lands in a later phase.
+    """
+    token = request.cookies.get("suka_draft_token")
+    if not token or not _DRAFT_TOKEN_RE.match(token):
+        token = orders_svc.unique_code(length=16)
+    return token
+
+
+_DRAFT_TOKEN_RE = re.compile(r"^[a-z0-9]{8,64}$")
+
+
+def _find_existing_draft(cursor, template_id, token):
+    """Draft invitation belonging to this (token, template) editing context."""
+    cursor.execute(
+        "SELECT id FROM invitations"
+        " WHERE state = 'draft' AND custom = 0"
+        "   AND json_extract(content_json, '$._meta.token') = ?"
+        "   AND json_extract(content_json, '$._meta.template_id') = ?"
+        " ORDER BY id DESC LIMIT 1",
+        (token, str(template_id)))
+    row = cursor.fetchone()
+    return row[0] if row else None
+
+
+_EDITOR_PAGE_HTML = """
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    {{ base_head }}
+    <title>Editor — {{ tname }}</title>
+    <style>
+        .editor-wrap { display: flex; gap: 16px; align-items: flex-start; }
+        .editor-form { flex: 1 1 320px; min-width: 0; }
+        .editor-preview { flex: 1 1 360px; position: sticky; top: 10px; }
+        .editor-preview iframe { width: 100%; height: 80vh; border: 1px solid #27272a; border-radius: 12px; background: #fff; }
+        .ed-group { background: #18181b; border: 1px solid #27272a; border-radius: 12px; padding: 14px; margin-bottom: 12px; }
+        .ed-group h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: #fbbf24; margin-bottom: 10px; }
+        .ed-field { margin-bottom: 10px; }
+        .ed-field label { display: block; font-size: 11px; color: #a1a1aa; margin-bottom: 4px; }
+        .ed-field input, .ed-field textarea, .ed-field select {
+            width: 100%; padding: 9px; border-radius: 8px; border: 1px solid #3f3f46;
+            background: #121215; color: #fff; font-size: 12px; }
+        .ed-field textarea { min-height: 70px; resize: vertical; }
+        .ed-error { color: #f87171; font-size: 10px; margin-top: 3px; display: none; }
+        .ed-item { border-top: 1px dashed #3f3f46; padding-top: 8px; margin-top: 8px; }
+        .ed-actions { display: flex; gap: 8px; margin-top: 14px; }
+        .ed-btn { flex: 1; padding: 11px; border-radius: 8px; border: none; font-weight: bold; font-size: 12px; cursor: pointer; }
+        .ed-save { background: #34d399; color: #000; }
+        .ed-preview-btn { background: #18181b; color: #fbbf24; border: 1px solid #fbbf24; }
+        #ed-status { font-size: 11px; color: #a1a1aa; margin-top: 8px; min-height: 16px; }
+        .ed-note { font-size: 10px; color: #71717a; margin-top: 6px; }
+    </style>
+</head>
+<body>
+    {{ config_js }}
+    <div class="container">
+        <div class="content-wrap">
+            <div class="navbar">
+                <a href="/" class="brand-group">
+                    <span class="brand-main">SUKA MOTO</span>
+                    <span class="brand-sub">Invitation</span>
+                </a>
+            </div>
+            <div class="section-title">Edit Undangan — {{ tname }}</div>
+            <div class="editor-wrap">
+                <div class="editor-form">
+                    <form id="ed-form" onsubmit="return false;"></form>
+                    <div class="ed-actions">
+                        <button type="button" class="ed-btn ed-preview-btn" id="ed-preview">Preview</button>
+                        <button type="button" class="ed-btn ed-save" id="ed-save">Simpan Draft</button>
+                    </div>
+                    <div id="ed-status"></div>
+                    <div class="ed-note">Draft tersimpan di server; preview bersifat sementara dan tidak mengubah data tersimpan.</div>
+                </div>
+                <div class="editor-preview">
+                    <iframe id="ed-frame" title="Preview undangan" sandbox="allow-scripts allow-same-origin"></iframe>
+                </div>
+            </div>
+        </div>
+        {{ footer_html }}
+    </div>
+    <script>
+    (function () {
+        var FORM = window.__EDITOR_FORM__;
+        var DRAFT_BLOB = window.__EDITOR_DATA__ || {data: {}, theme: {}};
+        var DATA = DRAFT_BLOB.data || {};
+        DATA.theme = DRAFT_BLOB.theme || {};
+        var form = document.getElementById('ed-form');
+        var status = document.getElementById('ed-status');
+        var frame = document.getElementById('ed-frame');
+
+        function el(tag, attrs, children) {
+            var n = document.createElement(tag);
+            Object.keys(attrs || {}).forEach(function (k) {
+                if (k === 'text') n.textContent = attrs[k];
+                else if (k === 'html') n.innerHTML = attrs[k];
+                else n.setAttribute(k, attrs[k]);
+            });
+            (children || []).forEach(function (c) { n.appendChild(c); });
+            return n;
+        }
+
+        function fieldNode(f, value, namePrefix) {
+            var wrap = el('div', {'class': 'ed-field'});
+            var name = (namePrefix || '') + (f.name || f.key);
+            wrap.appendChild(el('label', {for: 'fld-' + name.replace(/[^a-zA-Z0-9]/g, '_'),
+                                          text: f.label + (f.required ? ' *' : '')}));
+            var input;
+            var v = value == null ? '' : String(value);
+            if (f.type === 'textarea') {
+                input = el('textarea', {name: name, rows: 3});
+                input.value = v;
+            } else if (f.type === 'select') {
+                input = el('select', {name: name});
+                input.appendChild(el('option', {value: '', text: '— pilih —'}));
+                (f.options || []).forEach(function (opt) {
+                    var o = el('option', {value: opt, text: opt});
+                    if (opt === v) o.selected = true;
+                    input.appendChild(o);
+                });
+            } else if (f.type === 'color') {
+                input = el('input', {type: 'text', name: name, placeholder: '#rrggbb'});
+                input.value = v;
+                if ((f.presets || []).length) {
+                    var dl = el('datalist', {id: 'dl-' + name.replace(/[^a-zA-Z0-9]/g, '_')});
+                    f.presets.forEach(function (p) { dl.appendChild(el('option', {value: p})); });
+                    input.setAttribute('list', dl.id);
+                    wrap.appendChild(dl);
+                }
+            } else if (f.type === 'image') {
+                input = el('input', {type: 'url', name: name, placeholder: 'https://…'});
+                input.value = v;
+            } else {
+                var t = f.type === 'date' ? 'date' : (f.type === 'time' ? 'time' : 'text');
+                input = el('input', {type: t, name: name});
+                if (t !== 'date' && t !== 'time') input.value = v;
+                else input.value = v;
+            }
+            if (f.max_length) input.maxLength = f.max_length;
+            input.id = 'fld-' + name.replace(/[^a-zA-Z0-9]/g, '_');
+            wrap.appendChild(input);
+            wrap.appendChild(el('div', {'class': 'ed-error', 'data-for': name}));
+            return wrap;
+        }
+
+        function collectRepeater(rep) {
+            var items = [];
+            form.querySelectorAll('[data-rep="' + rep.key + '"]').forEach(function (box) {
+                var item = {};
+                box.querySelectorAll('[name]').forEach(function (inp) {
+                    item[inp.getAttribute('data-key')] = inp.value;
+                });
+                items.push(item);
+            });
+            return items;
+        }
+
+        function collectData() {
+            var data = {};
+            FORM.groups.forEach(function (g) {
+                g.fields.forEach(function (f) {
+                    var inp = form.querySelector('[name="' + (f.name || f.key) + '"]');
+                    if (inp) data[f.key] = inp.value;
+                });
+            });
+            FORM.repeatables.forEach(function (rep) {
+                if (!rep.available) return;
+                data[rep.key] = collectRepeater(rep);
+            });
+            var theme = {};
+            FORM.theme.forEach(function (f) {
+                if (!f.available) return;
+                var inp = form.querySelector('[name="' + f.name + '"]');
+                if (inp && inp.value.trim()) theme[f.key] = inp.value.trim();
+            });
+            data.theme = theme;
+            return data;
+        }
+
+        function showErrors(errors) {
+            form.querySelectorAll('.ed-error').forEach(function (e) { e.style.display = 'none'; e.textContent = ''; });
+            Object.keys(errors || {}).forEach(function (k) {
+                var node = form.querySelector('.ed-error[data-for="' + k + '"]');
+                if (node) { node.textContent = errors[k]; node.style.display = 'block'; }
+            });
+        }
+
+        // Build groups
+        FORM.groups.forEach(function (g) {
+            var box = el('div', {'class': 'ed-group'});
+            box.appendChild(el('h3', {text: g.label}));
+            g.fields.forEach(function (f) { box.appendChild(fieldNode(f, DATA[f.key], '')); });
+            form.appendChild(box);
+        });
+
+        // Build repeatables
+        FORM.repeatables.forEach(function (rep) {
+            if (!rep.available) return;
+            var box = el('div', {'class': 'ed-group'});
+            box.appendChild(el('h3', {text: rep.label}));
+            (DATA[rep.key] || []).forEach(function (item) {
+                box.appendChild(repeaterItem(rep, item));
+            });
+            var add = el('button', {type: 'button', 'class': 'ed-btn ed-preview-btn', text: '+ Tambah'});
+            add.addEventListener('click', function () {
+                box.insertBefore(repeaterItem(rep, {}), add);
+            });
+            box.appendChild(add);
+            form.appendChild(box);
+        });
+
+        function repeaterItem(rep, item) {
+            var wrap = el('div', {'class': 'ed-item', 'data-rep': rep.key});
+            rep.fields.forEach(function (f) {
+                var node = fieldNode(f, item[f.key], rep.key + '.');
+                node.querySelector('[name]').setAttribute('data-key', f.key);
+                node.querySelector('[name]').setAttribute('name', rep.key + '.' + f.key);
+                node.querySelector('.ed-error').setAttribute('data-for', rep.key + '[0].' + f.key);
+                wrap.appendChild(node);
+            });
+            var rm = el('button', {type: 'button', text: 'Hapus', style: 'font-size:10px;background:none;border:none;color:#f87171;cursor:pointer;'});
+            rm.addEventListener('click', function () { wrap.remove(); });
+            wrap.appendChild(rm);
+            return wrap;
+        }
+
+        // Theme group
+        var themeAvail = FORM.theme.filter(function (f) { return f.available; });
+        if (themeAvail.length) {
+            var tbox = el('div', {'class': 'ed-group'});
+            tbox.appendChild(el('h3', {text: 'Tema'}));
+            themeAvail.forEach(function (f) {
+                var val = (DATA.theme || {})[f.key] || '';
+                tbox.appendChild(fieldNode({key: f.key, name: f.name, label: f.label, type: f.type,
+                                             required: false, max_length: 60, options: f.options,
+                                             presets: f.presets}, val, ''));
+            });
+            form.appendChild(tbox);
+        }
+
+        var lastPreviewHtml = null;
+        function postEditor(path, extra) {
+            var body = {template_id: {{ tmpl_id_js }}, data: collectData()};
+            if (window.__EDITOR_DRAFT_ID__) body.draft_id = window.__EDITOR_DRAFT_ID__;
+            Object.assign(body, extra || {});
+            return fetch(path, {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify(body), credentials: 'same-origin'})
+                .then(function (r) { return r.json().then(function (j) { return {status: r.status, json: j}; }); });
+        }
+
+        function refreshPreview() {
+            return postEditor('/editor/preview').then(function (res) {
+                if (res.json.ok) {
+                    lastPreviewHtml = res.json.html;
+                    frame.srcdoc = res.json.html;
+                    showErrors({});
+                } else {
+                    showErrors(res.json.errors || {});
+                    status.textContent = res.json.error || 'Preview gagal.';
+                }
+                return res;
+            });
+        }
+
+        document.getElementById('ed-preview').addEventListener('click', function () {
+            status.textContent = 'Memperbarui preview…';
+            refreshPreview().then(function () { status.textContent = ''; });
+        });
+
+        document.getElementById('ed-save').addEventListener('click', function () {
+            status.textContent = 'Menyimpan draft…';
+            postEditor('/editor/save').then(function (res) {
+                if (res.json.ok) {
+                    window.__EDITOR_DRAFT_ID__ = res.json.invitation_id;
+                    status.textContent = 'Draft tersimpan (ID ' + res.json.invitation_id + ').';
+                    showErrors({});
+                    if (lastPreviewHtml) frame.srcdoc = lastPreviewHtml;
+                    else refreshPreview();
+                } else {
+                    status.textContent = res.json.error || 'Gagal menyimpan.';
+                    showErrors(res.json.errors || {});
+                }
+            }).catch(function () { status.textContent = 'Kesalahan jaringan.'; });
+        });
+
+        // Debounced live preview while typing.
+        var debounce = null;
+        form.addEventListener('input', function () {
+            clearTimeout(debounce);
+            debounce = setTimeout(refreshPreview, 700);
+        });
+
+        refreshPreview();
+    })();
+    </script>
+    {{ nav_script }}
+</body>
+</html>
+"""
+
+
+async def _editor_new(request, resolved):
+    """Render the schema-driven editor page for a converted template."""
+    template_dir = resolved["template_dir"]
+    tier_code = resolved["tier_code"] or "silver"
+    schema = editor_svc.load_schema(template_dir)
+    if not schema:
+        # Template dir exists but has no usable schema: refuse rather than
+        # fall back to rendering user HTML; demo/legacy paths still work.
+        return web.Response(text="Schema template tidak tersedia", status=500)
+
+    token = _draft_identity(request)
+
+    # Existing draft for this editing context? (?draft= echo wins, then token.)
+    draft_id = None
+    requested_draft = (request.query.get('draft') or '').strip()
+    data, theme = {}, {}
+    conn = get_conn()
+    try:
+        cursor = conn.cursor()
+        if requested_draft.isdigit():
+            cursor.execute(
+                "SELECT id, content_json FROM invitations"
+                " WHERE id = ? AND state = 'draft'", (int(requested_draft),))
+            row = cursor.fetchone()
+            if row:
+                draft_id = row[0]
+                data, theme = editor_svc.draft_data(row[1])
+        if draft_id is None:
+            draft_id = _find_existing_draft(cursor, resolved["id"], token)
+            if draft_id is not None:
+                cursor.execute(
+                    "SELECT content_json FROM invitations WHERE id = ?", (draft_id,))
+                data, theme = editor_svc.draft_data(cursor.fetchone()[0])
+    finally:
+        conn.close()
+
+    if not data:
+        # First open without a draft: preview.json is the initial data ONLY.
+        data = dict(resolver_svc.load_preview_data(resolved))
+        theme = dict(data.pop("theme", {}) or {})
+        data.pop("slug", None)
+
+    form_meta = editor_svc.build_form_meta(schema, tier_code)
+    # Data + draft-id must be defined BEFORE the builder script runs: emit
+    # them right after <body>, together with the schema metadata.
+    data_js = (_json_script("__EDITOR_DATA__", {"data": data, "theme": theme})
+               + _json_script("__EDITOR_DRAFT_ID__", draft_id)
+               + _json_script("__EDITOR_FORM__", form_meta))
+    html_content = render(
+        _EDITOR_PAGE_HTML,
+        base_head=Markup(BASE_HEAD),
+        footer_html=Markup(FOOTER_HTML),
+        nav_script=Markup(NAV_SCRIPT),
+        tname=resolved["name"],
+        tmpl_id_js=_js_expr(int(resolved["id"])),
+        config_js=data_js,
+    )
+    resp = web.Response(text=html_content, content_type='text/html')
+    # Persist the draft identity cookie (HttpOnly, SameSite=Lax).
+    resp.set_cookie("suka_draft_token", token, httponly=True, samesite="Lax",
+                    max_age=30 * 24 * 3600)
+    return resp
+
+
+async def _read_editor_payload(request):
+    """Parse + sanity-check the JSON body shared by preview/save endpoints."""
+    if request.content_length and request.content_length > editor_svc.MAX_PAYLOAD_BYTES:
+        return None, {"error": "Payload terlalu besar."}
+    try:
+        payload = await request.json()
+    except Exception:
+        return None, {"error": "Body harus JSON yang valid."}
+    if not isinstance(payload, dict):
+        return None, {"error": "Body harus objek JSON."}
+    template_id = payload.get("template_id")
+    if not isinstance(template_id, int) or template_id <= 0:
+        return None, {"error": "template_id tidak valid."}
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return None, {"error": "Field data harus berupa objek."}
+    return payload, None
+
+
+def _resolve_new_template(template_id):
+    """Resolver lookup restricted to converted templates (never arbitrary
+    filesystem paths — everything flows through template_resolver)."""
+    resolved = resolver_svc.resolve_template_by_id(template_id)
+    if resolved["source"] != resolver_svc.SOURCE_NEW:
+        raise resolver_svc.TemplateSourceUnavailable(
+            f"template {template_id} belum memiliki source baru")
+    return resolved
+
+
+async def handle_editor_preview(request):
+    """POST /editor/preview — transient render of current editor data.
+
+    NEVER touches the database: no invitation, no order, no draft writes.
+    """
+    payload, err = await _read_editor_payload(request)
+    if err:
+        return web.json_response({"ok": False, **err}, status=400)
+    try:
+        resolved = _resolve_new_template(payload["template_id"])
+    except resolver_svc.TemplateResolutionError:
+        return web.json_response({"ok": False, "error": "Template tidak ditemukan."},
+                                 status=404)
+
+    schema = editor_svc.load_schema(resolved["template_dir"])
+    tier_code = resolved["tier_code"] or "silver"
+    try:
+        data, theme = editor_svc.parse_and_validate(payload["data"], schema, tier_code)
+    except editor_svc.EditorValidationError as exc:
+        return web.json_response({"ok": False, "errors": exc.errors}, status=422)
+
+    try:
+        html = render_svc.render_invitation(
+            template_dir=resolved["template_dir"],
+            data=data,
+            theme=theme,
+            tier_code=tier_code,
+            mode="preview",
+        )
+    except Exception:
+        return web.json_response({"ok": False, "error": "Gagal merender preview."},
+                                 status=500)
+    return web.json_response({"ok": True, "html": html})
+
+
+async def handle_editor_save(request):
+    """POST /editor/save — create/update the draft invitation atomically.
+
+    Repeated saves from the same editing context update the SAME invitation
+    (identity: draft_id echoed by the client, else the HttpOnly token cookie
+    scoped to the template). A minimal parent order in state ``draft`` is
+    created inside the same transaction because invitations.order_id is NOT
+    NULL; it is never marked paid and nothing is published here.
+    """
+    payload, err = await _read_editor_payload(request)
+    if err:
+        return web.json_response({"ok": False, **err}, status=400)
+    try:
+        resolved = _resolve_new_template(payload["template_id"])
+    except resolver_svc.TemplateResolutionError:
+        return web.json_response({"ok": False, "error": "Template tidak ditemukan."},
+                                 status=404)
+
+    schema = editor_svc.load_schema(resolved["template_dir"])
+    tier_code = resolved["tier_code"] or "silver"
+    try:
+        data, theme = editor_svc.parse_and_validate(payload["data"], schema, tier_code)
+    except editor_svc.EditorValidationError as exc:
+        return web.json_response({"ok": False, "errors": exc.errors}, status=422)
+
+    token = _draft_identity(request)
+    content = json.loads(editor_svc.draft_content(data, theme))
+    content["_meta"] = {"token": token, "template_id": str(resolved["id"]),
+                        "code": resolved["code"]}
+    content_blob = json.dumps(content, ensure_ascii=False)
+
+    conn = get_conn()
+    try:
+        cursor = conn.cursor()
+        draft_id = payload.get("draft_id")
+        existing = None
+        if isinstance(draft_id, int) and draft_id > 0:
+            # Honour the client echo only when it really is a draft owned by
+            # this token/template — never hijack somebody else's row.
+            cursor.execute(
+                "SELECT id FROM invitations WHERE id = ? AND state = 'draft'"
+                " AND json_extract(content_json, '$._meta.token') = ?",
+                (draft_id, token))
+            row = cursor.fetchone()
+            existing = row[0] if row else None
+        if existing is None:
+            existing = _find_existing_draft(cursor, resolved["id"], token)
+
+        now = orders_svc._now_str()
+        couple_names = (data.get("title") or "").strip() or "Mempelai"
+        event_date = data.get("event", {}).get("date_iso", "") if isinstance(data.get("event"), dict) else data.get("date_iso", "")
+        if not event_date:
+            event_date = data.get("date_label", "") or data.get("date", "")
+        event_time = data.get("time_range", "") or data.get("time", "")
+        venue_name = ""
+        for ev in data.get("events", []) or []:
+            if isinstance(ev, dict) and ev.get("venue_name"):
+                venue_name = ev["venue_name"]
+                break
+
+        if existing is not None:
+            cursor.execute(
+                "UPDATE invitations SET content_json = ?, title = ?,"
+                " couple_names = ?, event_date = ?, event_time = ?,"
+                " venue_name = ?, colors_json = ?, updated_at = ?,"
+                " state = 'draft' WHERE id = ? AND state = 'draft'",
+                (content_blob, f"The Wedding of {couple_names}", couple_names,
+                 event_date, event_time, venue_name,
+                 json.dumps(theme, ensure_ascii=False), now, existing))
+            conn.commit()
+            invitation_id = existing
+        else:
+            # --- atomic creation: draft order + draft invitation ---------
+            order_id = None
+            try:
+                code = orders_svc.new_order_code(conn)
+                cursor.execute(
+                    "INSERT INTO orders (code, tier_id, template_id, status)"
+                    " VALUES (?, ?, ?, ?)",
+                    (code, resolved["tier_id"], resolved["id"], orders_svc.DRAFT))
+                order_id = cursor.lastrowid
+
+                # Draft slug: unique, clearly non-public (publishing will
+                # regenerate the final slug in a later phase).
+                slug = orders_svc.unique_code(length=12, conn=conn)
+                cursor.execute(
+                    "INSERT INTO invitations (order_id, slug, title, couple_names,"
+                    " event_date, event_time, venue_name, colors_json, content_json,"
+                    " state, created_at, updated_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)",
+                    (order_id, slug, f"The Wedding of {couple_names}", couple_names,
+                     event_date, event_time, venue_name,
+                     json.dumps(theme, ensure_ascii=False), content_blob, now, now))
+                invitation_id = cursor.lastrowid
+                orders_svc.log_order_event(
+                    conn, order_id, actor="client", action="draft_created",
+                    from_status="", to_status=orders_svc.DRAFT,
+                    note=f"template={resolved['code']}")
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+    finally:
+        conn.close()
+
+    resp = web.json_response({"ok": True, "invitation_id": invitation_id})
+    resp.set_cookie("suka_draft_token", token, httponly=True, samesite="Lax",
+                    max_age=30 * 24 * 3600)
+    return resp
 
 
 async def handle_checkout(request):
@@ -685,6 +1263,8 @@ def setup(app):
     app.router.add_get('/template-action', handle_template_action)
     app.router.add_get('/demo', handle_demo)
     app.router.add_get('/editor', handle_editor)
+    app.router.add_post('/editor/preview', handle_editor_preview)
+    app.router.add_post('/editor/save', handle_editor_save)
     app.router.add_get('/checkout', handle_checkout)
     app.router.add_get('/guestbook', handle_guestbook)
     app.router.add_post('/guestbook', handle_guestbook)

@@ -1,8 +1,33 @@
 {
   "title": "Rian & Siska",
   "intro": "Dengan memohon rahmat dan ridho Allah SWT, kami bermaksud menyelenggarakan pernikahan putra-putri kami.",
+  "groom_full_name": "Rian Pratama, S.T.",
+  "bride_full_name": "Siskawati, S.E.",
   "date_label": "Sabtu, 12 Desember 2026",
+  "day_label_full": "Sabtu, 12 Desember 2026",
+  "date_iso": "2026-12-12",
+  "time_range": "09.00 - 11.00 WIB",
   "venue_name": "Gedung Kencana Cirebon",
+  "events": [
+    {
+      "label": "Akad Nikah",
+      "icon": "fa-solid fa-book-quran",
+      "day_date": "Sabtu, 12 Desember 2026",
+      "time_range": "09.00 WIB",
+      "venue_name": "Gedung Kencana Cirebon",
+      "venue_address": "Jl. Veteran No.1, Cirebon",
+      "btn_class": "btn-outline-matcha"
+    },
+    {
+      "label": "Resepsi",
+      "icon": "fa-solid fa-champagne-glasses",
+      "day_date": "Sabtu, 12 Desember 2026",
+      "time_range": "11.00 - 14.00 WIB",
+      "venue_name": "Gedung Kencana Cirebon",
+      "venue_address": "Jl. Veteran No.1, Cirebon",
+      "btn_class": "btn-matcha"
+    }
+  ],
   "theme": {
     "primary": "#7a8b6f",
     "accent": "#d4af37",
