@@ -1648,24 +1648,32 @@ async def handle_payment_proof_upload(request):
     """
     order_code = ""
     field_name = None
-    chunks = []
-    size = 0
+    data = b""
     try:
         reader = await request.multipart()
         field = await reader.next()
         while field is not None:
             if field.name == "order":
-                order_code = str(await field.read(decode=True) or "")[:32]
+                raw = await field.read(decode=True)
+                if isinstance(raw, (bytes, bytearray)):
+                    raw = bytes(raw).decode("utf-8", "replace")
+                order_code = str(raw or "").strip()[:32]
             elif field.name == "file" and field.filename:
                 field_name = field.filename
+                # Bounded streaming read: stop after MAX_PROOF_SIZE + 1 byte
+                # so an oversized upload can never exhaust memory. The exact
+                # 5 MB cap is enforced (again) inside store_proof().
+                chunks = []
+                size = 0
                 while True:
-                    chunk = await field.read_chunk(8192, raise_exception=False)
+                    chunk = await field.read_chunk(8192)   # raw bytes, no decoding
                     if not chunk:
                         break
                     size += len(chunk)
-                    if size > payments_svc.MAX_PROOF_SIZE + 1024 * 1024:
-                        break           # hard streaming guard; exact cap below
                     chunks.append(chunk)
+                    if size > payments_svc.MAX_PROOF_SIZE:
+                        break           # oversize — rejected by the check below
+                data = b"".join(chunks)
             field = await reader.next()
     except Exception:
         return web.json_response({"ok": False, "error": "Upload tidak valid."},
@@ -1674,7 +1682,11 @@ async def handle_payment_proof_upload(request):
     if not order_code or not str(order_code).strip():
         return web.json_response({"ok": False, "error": "Pesanan tidak valid."},
                                  status=400)
-    data = b"".join(chunks)
+    if len(data) > payments_svc.MAX_PROOF_SIZE:
+        return web.json_response(
+            {"ok": False,
+             "error": f"Ukuran file maksimal {payments_svc.MAX_PROOF_SIZE // (1024 * 1024)} MB."},
+            status=422)
     if not data:
         return web.json_response({"ok": False, "error": "File bukti pembayaran wajib diisi."},
                                  status=422)
