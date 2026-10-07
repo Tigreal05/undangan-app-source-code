@@ -1623,6 +1623,16 @@ def security_safe_upload_url(rel_path: str) -> str:
     return "/static_uploads/" + os.path.basename(abs_path)
 
 
+class _ProofAlreadySubmitted(web.HTTPException):
+    """Internal control-flow signal: a duplicate browser upload answers with
+    the payment page + inline error banner (no overwrite, no new row)."""
+
+    def __init__(self, order_code: str):
+        super().__init__(
+            location=f"/payment?order={order_code}&err="
+                     "Bukti+sudah+dikirim.+Tidak+perlu+kirim+ulang.")
+
+
 async def handle_payment_proof_upload(request):
     """POST /payment/proof — secure payment-proof upload (Phase 3.2).
 
@@ -1691,22 +1701,33 @@ async def handle_payment_proof_upload(request):
                            else f"Pembayaran tidak tersedia untuk status '{status}'.")},
                 status=409)
 
-        # One transaction: payment row + order transition together.
+        cursor.execute("SELECT payment_method FROM orders WHERE id = ?", (oid,))
+        method_row = cursor.fetchone()
+        method_db = (method_row[0] if method_row and method_row[0] else "")
+
+        # Deterministic duplicate guard: an already-submitted active payment
+        # must never be overwritten by a second upload.
+        payment = payments_svc.get_active_payment(cursor, oid)
+        if payment is not None and payment["status"] == payments_svc.SUBMITTED:
+            return web.json_response(
+                {"ok": False,
+                 "error": "Bukti sudah dikirim. Tidak perlu kirim ulang."},
+                status=409)
+
+        # Validate the file BEFORE any DB write / storage.
         try:
-            if payment is not None and payment["status"] != "pending":
-                # Already submitted (order/payment states out of sync guard):
-                # deterministic duplicate — do NOT overwrite the first proof.
-                raise web.HTTPFound(f"/payment?order={oc}&err=" + quote(
-                    'Bukti sudah dikirim. Tidak perlu kirim ulang.'))
             rel_path, ext, mime, real_size = payments_svc.store_proof(
                 oid, data, field_name or "")
         except ValueError as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=422)
 
+        import security
+        stored_abs = security.safe_upload_path(rel_path) if rel_path else None
         try:
             if payment is None:
-                # No active attempt yet — create one with the checkout method
-                # (amount always re-derived from the authoritative order).
+                # No active attempt yet — create one with the order's chosen
+                # method (amount always re-derived from the authoritative
+                # order total; client-supplied amounts are ignored).
                 payment, _created = payments_svc.ensure_payment(
                     conn, oid,
                     payments_svc.normalize_method(method_db) or "bank_transfer")
@@ -1714,40 +1735,51 @@ async def handle_payment_proof_upload(request):
                 conn, payment["id"], rel_path=rel_path,
                 original_name=field_name or "", mime=mime, size=real_size)
             if rc != 1:
+                # Lost a race against a concurrent submission — deterministic
+                # duplicate outcome; keep the first proof untouched.
                 conn.rollback()
-                raise web.HTTPFound(f"/payment?order={oc}&err=" + quote(
-                    'Bukti sudah dikirim. Tidak perlu kirim ulang.'))
+                if stored_abs and os.path.isfile(stored_abs):
+                    os.remove(stored_abs)
+                raise _ProofAlreadySubmitted(oc)
             orders_svc.transition(conn, oid, orders_svc.PAYMENT_REPORTED,
                                   actor="client",
                                   actor_note="bukti pembayaran diunggah",
                                   commit=False)
             conn.commit()
-        except web.HTTPFound as redirect:
-            conn.rollback()
+        except _ProofAlreadySubmitted:
             raise
         except orders_svc.IllegalTransition:
             conn.rollback()
+            if stored_abs and os.path.isfile(stored_abs):
+                os.remove(stored_abs)
             return web.json_response(
                 {"ok": False, "error": "Status pesanan berubah. Silakan muat ulang halaman."},
                 status=409)
         except Exception:
             conn.rollback()
+            if stored_abs and os.path.isfile(stored_abs):
+                os.remove(stored_abs)
             return web.json_response(
                 {"ok": False, "error": "Gagal menyimpan bukti pembayaran."}, status=500)
     finally:
         conn.close()
 
-    try:
-        orders_svc.notify_admin(conn2 := get_conn(), "payment_reported", {
-            "order_code": oc, "order_id": oid, "payment_id": payment["id"],
-            "amount": amount, "method": payment["method"]})
-    except Exception:
-        pass
-    else:
-        finally_close = getattr(conn2, "close", None)
-        if callable(finally_close):
-            conn2.close()
-
+    # Browser form POST -> redirect back to the payment page which shows
+    # "✓ Bukti pembayaran berhasil dikirim." + "Menunggu verifikasi".
+    # Fetch/XHR (AJAX) callers get a structured JSON response instead.
+    wants_json = (
+        request.headers.get("Accept") == "application/json"
+        or str(request.headers.get("X-Requested-With", "")).lower() == "fetch"
+        or "multipart/form-data" not in (request.content_type or "")
+    )
+    if wants_json:
+        return web.json_response({
+            "ok": True,
+            "order": oc,
+            "payment_status": payments_svc.SUBMITTED,
+            "message": "Bukti pembayaran berhasil dikirim. "
+                       "Status: Menunggu verifikasi pembayaran.",
+        })
     return web.HTTPSeeOther(f"/payment?order={oc}")
 
 

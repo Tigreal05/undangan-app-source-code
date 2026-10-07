@@ -497,6 +497,21 @@ def _m9_tier_matrix_fix(cursor):
              tiers_svc.get_tier(code)["sort_order"], code))
 
 
+@migration(10)
+def _m10_payment_proof_columns(cursor):
+    """Phase 3.2: bookkeeping columns for customer payment-proof submission.
+
+    The legacy ``payments`` table (migration 1) predates the proof-upload
+    flow; add the missing columns idempotently. Existing rows keep their
+    values; new submissions record submitted_at + proof provenance
+    (original name / mime / size packed into ``reference`` as PROOF:<json>).
+    Additive & idempotent — no data rewrite, existing orders/payments stay
+    valid.
+    """
+    _add_column(cursor, 'payments', 'submitted_at', "TIMESTAMP")
+    _add_column(cursor, 'payments', 'updated_at', "TIMESTAMP")
+
+
 # ---------------------------------------------------------------------------
 # Seed data
 # ---------------------------------------------------------------------------
