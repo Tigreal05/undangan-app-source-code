@@ -262,7 +262,9 @@ async def test_checkout_form_is_post(aiohttp_client):
     client = await aiohttp_client(create_app())
     resp = await client.get("/checkout?id=1")
     body = await resp.text()
-    assert 'action="/guestbook" method="POST"' in body
+    # Phase 3.1 checkout contract: form posts to /checkout/confirm
+    # (legacy /guestbook target is obsolete).
+    assert 'action="/checkout/confirm" method="POST"' in body
 
 
 @pytest.mark.asyncio

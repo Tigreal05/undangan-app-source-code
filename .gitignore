@@ -1,3 +1,6 @@
-# Compiled and build artifacts
+# Python compiled files
 __pycache__/
 *.pyc
+
+# Database backups
+backups/
