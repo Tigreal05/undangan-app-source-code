@@ -1044,7 +1044,11 @@ async def handle_editor_save(request):
                 conn.commit()
             except Exception:
                 conn.rollback()
-                raise
+                # Rollback completed safely — return a structured JSON error
+                # (no orphan order, no partial invitation) instead of letting
+                # the exception escape into aiohttp's plaintext 500 handler.
+                return web.json_response(
+                    {"ok": False, "error": "Gagal menyimpan draft."}, status=500)
     finally:
         conn.close()
 
