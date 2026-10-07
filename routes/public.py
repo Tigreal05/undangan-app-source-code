@@ -12,6 +12,8 @@ from markupsafe import Markup
 import config
 from db import get_conn
 from routes.common import BASE_HEAD, FOOTER_HTML, NAV_SCRIPT, render
+from services import render as render_svc
+from services import template_resolver as resolver_svc
 from services.tiers import duration_label as _tier_duration, get_tier
 
 # Legacy free-text values that used to live in templates.duration; the period
@@ -381,18 +383,9 @@ async def handle_template_action(request):
     return web.Response(text=html_content, content_type='text/html')
 
 
-async def handle_demo(request):
-    tmpl_id = request.query.get('id')
-    conn = get_conn()
-    cursor = conn.cursor()
-    cursor.execute('SELECT html_code FROM templates WHERE id = ?', (tmpl_id,))
-    res = cursor.fetchone()
-    conn.close()
-
-    if not res or not res[0]:
-        return web.Response(text="Demo tidak ditemukan", status=404)
-
-    protected_html = res[0].replace("<body>", """<body>
+#: Protection script used ONLY by the legacy demo path (html_code templates).
+#: New templates get their watermark/protection from render.decorate_mode().
+_LEGACY_PROTECT_HTML = """<body>
     <script>
         document.addEventListener('contextmenu', event => event.preventDefault());
         document.onkeydown = function(e) {
@@ -402,8 +395,59 @@ async def handle_demo(request):
         }
     </script>
     <div style="position:fixed; bottom:10px; right:10px; background:rgba(0,0,0,0.7); color:#fbbf24; font-size:10px; padding:4px 8px; border-radius:4px; z-index:9999;">SUKA MOTO DEMO MODE</div>
-    """)
-    return web.Response(text=protected_html, content_type='text/html')
+    """
+
+
+def _legacy_demo_html(html_code):
+    """Legacy /demo behaviour: inject protection + watermark after <body>."""
+    return html_code.replace("<body>", _LEGACY_PROTECT_HTML)
+
+
+async def handle_demo(request):
+    """GET /demo?id=<template_id>[&to=Nama Tamu].
+
+    Phase 1 migration: the DB row is resolved through services.template_resolver.
+    * source="new"    → rendered via services.render.render_invitation with
+                        preview.json data and mode="demo" (watermark and
+                        protection are added once by decorate_mode — never
+                        duplicated here).
+    * source="legacy" → unchanged legacy behaviour: templates.html_code with
+                        the inline protection/wrapper below.
+    """
+    tmpl_id = request.query.get('id')
+    guest_name = request.query.get('to')
+    try:
+        resolved = resolver_svc.resolve_template_by_id(tmpl_id)
+    except resolver_svc.TemplateResolutionError:
+        return web.Response(text="Demo tidak ditemukan", status=404)
+
+    if resolved["source"] == resolver_svc.SOURCE_NEW:
+        # Demo data comes exclusively from preview.json (never hardcoded here).
+        preview_data = resolver_svc.load_preview_data(resolved)
+        try:
+            html = render_svc.render_invitation(
+                template_dir=resolved["template_dir"],
+                data=preview_data or None,
+                theme=preview_data.get("theme") if preview_data else None,
+                tier_code=resolved["tier_code"] or "silver",
+                mode="demo",
+                guest_name=guest_name,
+            )
+        except Exception:
+            # Broken new source must never take the demo page down: fall back
+            # to the legacy html_code when one exists.
+            if not resolved["html_code"]:
+                return web.Response(text="Demo tidak ditemukan", status=404)
+            return web.Response(
+                text=_legacy_demo_html(resolved["html_code"]),
+                content_type='text/html')
+        return web.Response(text=html, content_type='text/html')
+
+    # Legacy template (not yet converted): keep the old demo behaviour as-is.
+    if not resolved["html_code"]:
+        return web.Response(text="Demo tidak ditemukan", status=404)
+    return web.Response(text=_legacy_demo_html(resolved["html_code"]),
+                        content_type='text/html')
 
 
 async def handle_editor(request):

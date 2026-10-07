@@ -596,16 +596,50 @@ def _seed_data(cursor):
             row = cursor.fetchone()
             return row[0] if row else 1
         silver_pkg, gold_pkg = _pkg_id_for('silver'), _pkg_id_for('gold')
-        initial_tmpls = [
-            (silver_pkg, 'Classic Floral', 'Rp 150.000', 'Diskon 10%', tier_ids.get('silver'), 'https://images.unsplash.com/photo-1520854221256-17451cc331bf?auto=format&fit=crop&w=400&q=80', SAMPLE_HTML, 1, 'classic-floral'),
-            (silver_pkg, 'Minimalist Monokrom', 'Rp 175.000', '', tier_ids.get('silver'), 'https://images.unsplash.com/photo-1519225421980-715cb0215aed?auto=format&fit=crop&w=400&q=80', SAMPLE_HTML, 1, 'minimalist-monokrom'),
-            (gold_pkg, 'Rustic Wood', 'Rp 300.000', 'Promo Launching', tier_ids.get('gold'), 'https://images.unsplash.com/photo-1511795409834-ef04bbd61622?auto=format&fit=crop&w=400&q=80', SAMPLE_HTML, 1, 'rustic-wood'),
-            (gold_pkg, 'Modern Gold Luxury', 'Rp 350.000', 'Best Seller', tier_ids.get('gold'), 'https://images.unsplash.com/photo-1532712938310-34cb3982ef74?auto=format&fit=crop&w=400&q=80', SAMPLE_HTML, 1, 'modern-gold-luxury'),
+        # Phase 1 resolver: first data-driven template converted to
+        # templates_html/silver/s01-classic-matcha/ (source_dir is relative to
+        # config.TEMPLATES_HTML_DIR). No html_code — the renderer reads the
+        # files from disk instead. It takes the first seed slot so existing
+        # tests that reference template ids 1..4 keep their legacy semantics.
+        matcha_schema = _template_source_json('s01-classic-matcha', 'schema.json')
+        matcha_preview = _template_source_json('s01-classic-matcha', 'preview.json')
+        initial_tmpls = []
+        if matcha_schema is not None:
+            initial_tmpls.append((
+                silver_pkg, 'Classic Matcha', 'Rp 150.000', '',
+                tier_ids.get('silver'),
+                'https://images.unsplash.com/photo-1520854221256-17451cc331bf?auto=format&fit=crop&w=400&q=80',
+                '', 0, 's01-classic-matcha', 'silver/s01-classic-matcha',
+                matcha_schema, matcha_preview))
+        initial_tmpls += [
+            (silver_pkg, 'Classic Floral', 'Rp 150.000', 'Diskon 10%', tier_ids.get('silver'), 'https://images.unsplash.com/photo-1520854221256-17451cc331bf?auto=format&fit=crop&w=400&q=80', SAMPLE_HTML, 1, 'classic-floral', '', '{}', '{}'),
+            (silver_pkg, 'Minimalist Monokrom', 'Rp 175.000', '', tier_ids.get('silver'), 'https://images.unsplash.com/photo-1519225421980-715cb0215aed?auto=format&fit=crop&w=400&q=80', SAMPLE_HTML, 1, 'minimalist-monokrom', '', '{}', '{}'),
+            (gold_pkg, 'Rustic Wood', 'Rp 300.000', 'Promo Launching', tier_ids.get('gold'), 'https://images.unsplash.com/photo-1511795409834-ef04bbd61622?auto=format&fit=crop&w=400&q=80', SAMPLE_HTML, 1, 'rustic-wood', '', '{}', '{}'),
+            (gold_pkg, 'Modern Gold Luxury', 'Rp 350.000', 'Best Seller', tier_ids.get('gold'), 'https://images.unsplash.com/photo-1532712938310-34cb3982ef74?auto=format&fit=crop&w=400&q=80', SAMPLE_HTML, 1, 'modern-gold-luxury', '', '{}', '{}'),
         ]
         cursor.executemany(
             'INSERT INTO templates (package_id, name, price, discount, tier_id,'
-            ' image_url, html_code, is_top10, code)'
-            ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', initial_tmpls)
+            ' image_url, html_code, is_top10, code, source_dir,'
+            ' schema_json, preview_json)'
+            ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', initial_tmpls)
+
+
+def _template_source_json(code, filename):
+    """Mirror of a converted template file for DB seeding; None when the
+    source dir does not exist (e.g. a stripped-down checkout)."""
+    import json
+    path = os.path.join(config.TEMPLATES_HTML_DIR, 'silver', code, filename)
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            content = f.read()
+    except OSError:
+        return None
+    # Store compactly but validate it parses (schema/preview must be JSON).
+    try:
+        json.loads(content)
+    except ValueError:
+        return None
+    return content
 
 
 # ---------------------------------------------------------------------------

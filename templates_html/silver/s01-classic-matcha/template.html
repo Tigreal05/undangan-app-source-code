@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Undangan Pernikahan {{ d.title | default('Mempelai') }}</title>
+    <style>
+        :root {
+            --c-primary: #7a8b6f;
+            --c-accent: #d4af37;
+            --c-bg: #fdfbf7;
+            --c-text: #333333;
+            --font-head: Georgia, serif;
+            --font-body: Georgia, serif;
+        }
+        {% for var, value in theme %}
+        :root { {{ var }}: {{ value }}; }
+        {% endfor %}
+        body { background: var(--c-bg); color: var(--c-text); font-family: var(--font-body); text-align: center; padding: 40px; margin: 0; }
+        h1, h2, h3 { font-family: var(--font-head); color: var(--c-primary); }
+        .accent { color: var(--c-accent); }
+    </style>
+</head>
+<body>
+    {% if guest_name %}
+    <p class="guest-greeting">Untuk Yang Terhormat <strong>{{ guest_name }}</strong></p>
+    {% endif %}
+    <h1>The Wedding of</h1>
+    <h2>{{ d.title | default('Rian & Siska') }}</h2>
+    <p>{{ d.intro or '' }}</p>
+    <div data-feature="countdown">
+        <p>{{ d.date_label | default('12 Desember 2026') }}</p>
+    </div>
+    <div data-feature="map">
+        <p>{{ d.venue_name | default('Gedung Kencana Cirebon') }}</p>
+    </div>
+    <div data-feature="qr">
+        <p>QR Undangan</p>
+    </div>
+    <hr style="width:50%;margin:20px auto;">
+    <p>Merupakan suatu kehormatan dan kebahagiaan bagi kami apabila Bapak/Ibu berkenan hadir.</p>
+    <form data-api="/api/rsvp">
+        <button type="submit">Konfirmasi Kehadiran</button>
+    </form>
+</body>
+</html>
